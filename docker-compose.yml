@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: realmstack
+      POSTGRES_PASSWORD: realmstack
+      POSTGRES_DB: realmstack
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U realmstack -d realmstack"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - realmstack-db:/var/lib/postgresql/data
+  api:
+    build: .
+    restart: unless-stopped
+    environment:
+      APP_ENV: local
+      HTTP_ADDR: :8080
+      DATABASE_URL: postgres://realmstack:realmstack@db:5432/realmstack?sslmode=disable
+      JWT_SECRET: local-only-change-me-before-deploy-please
+      DEMO_MODE: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+volumes:
+  realmstack-db:

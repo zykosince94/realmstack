@@ -1,0 +1,853 @@
+package app
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
+)
+
+type Config struct {
+	Env        string
+	JWTSecret  string
+	AccessTTL  time.Duration
+	RefreshTTL time.Duration
+	BodyLimit  int64
+	DemoMode   bool
+}
+
+type Server struct {
+	db     *pgxpool.Pool
+	cfg    Config
+	log    *slog.Logger
+	router *gin.Engine
+}
+
+type principal struct {
+	ID, ProjectID, EnvironmentID, Kind string
+}
+
+func New(db *pgxpool.Pool, cfg Config, logger *slog.Logger) *Server {
+	if cfg.BodyLimit <= 0 {
+		cfg.BodyLimit = 1 << 20
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	gin.SetMode(gin.ReleaseMode)
+	s := &Server{db: db, cfg: cfg, log: logger, router: gin.New()}
+	s.router.Use(s.recovery(), s.requestContext(), s.limitBody())
+	s.routes()
+	s.router.NoRoute(func(c *gin.Context) {
+		failure(c, http.StatusNotFound, "NOT_FOUND", "The requested route was not found.")
+	})
+	s.router.NoMethod(func(c *gin.Context) {
+		failure(c, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "The method is not allowed for this route.")
+	})
+	return s
+}
+
+func (s *Server) Run(addr string) error { return s.router.Run(addr) }
+
+func ParseIntEnv(key string, fallback int) int {
+	v, err := strconv.Atoi(os.Getenv(key))
+	if err != nil || v <= 0 {
+		return fallback
+	}
+	return v
+}
+
+func Migrate(ctx context.Context, db *pgxpool.Pool) error {
+	if _, err := db.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations(version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
+		return fmt.Errorf("create migration ledger: %w", err)
+	}
+	files, err := filepath.Glob(filepath.Join("migrations", "*.sql"))
+	if err != nil {
+		return fmt.Errorf("list migrations: %w", err)
+	}
+	for _, file := range files {
+		version := filepath.Base(file)
+		var applied bool
+		if err = db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)`, version).Scan(&applied); err != nil {
+			return fmt.Errorf("check migration %s: %w", version, err)
+		}
+		if applied {
+			continue
+		}
+		b, readErr := os.ReadFile(file)
+		if readErr != nil {
+			return fmt.Errorf("read migration %s: %w", version, readErr)
+		}
+		tx, beginErr := db.Begin(ctx)
+		if beginErr != nil {
+			return fmt.Errorf("begin migration %s: %w", version, beginErr)
+		}
+		if _, err = tx.Exec(ctx, string(b)); err == nil {
+			_, err = tx.Exec(ctx, `INSERT INTO schema_migrations(version) VALUES($1)`, version)
+		}
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("apply migration %s: %w", version, err)
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit migration %s: %w", version, err)
+		}
+	}
+	return nil
+}
+
+func (s *Server) requestContext() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := strings.TrimSpace(c.GetHeader("X-Request-ID"))
+		if len(id) < 8 || len(id) > 80 || !requestIDPattern.MatchString(id) {
+			id = randomUUID()
+		}
+		c.Set("request_id", id)
+		c.Header("X-Request-ID", id)
+		start := time.Now()
+		c.Next()
+		s.log.Info("http request", "request_id", id, "method", c.Request.Method, "path", c.FullPath(), "status", c.Writer.Status(), "duration_ms", time.Since(start).Milliseconds())
+	}
+}
+
+func (s *Server) recovery() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				s.log.Error("request panic", "request_id", c.GetString("request_id"), "error", fmt.Sprint(recovered))
+				if !c.Writer.Written() {
+					failure(c, http.StatusInternalServerError, "INTERNAL_ERROR", "An unexpected error occurred.")
+				}
+			}
+		}()
+		c.Next()
+	}
+}
+
+func (s *Server) limitBody() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, s.cfg.BodyLimit)
+		c.Next()
+	}
+}
+
+func (s *Server) routes() {
+	r := s.router
+	r.GET("/healthz", func(c *gin.Context) { success(c, http.StatusOK, gin.H{"status": "ok"}) })
+	v := r.Group("/v1")
+	v.POST("/auth/register", s.registerUser)
+	v.POST("/auth/login", s.loginUser)
+	v.GET("/projects", s.userAuth(), s.listProjects)
+	v.POST("/projects", s.userAuth(), s.createProject)
+	v.GET("/projects/:projectId", s.userAuth(), s.getProject)
+	v.PATCH("/projects/:projectId", s.userAuth(), s.updateProject)
+	v.DELETE("/projects/:projectId", s.userAuth(), s.deleteProject)
+	v.GET("/projects/:projectId/environments", s.userAuth(), s.listEnvironments)
+	v.POST("/projects/:projectId/environments", s.userAuth(), s.createEnvironment)
+	v.GET("/projects/:projectId/environments/:envId/credentials", s.userAuth(), s.listCredentials)
+	v.POST("/projects/:projectId/environments/:envId/credentials", s.userAuth(), s.issueCredential)
+	v.POST("/credentials/:id/revoke", s.userAuth(), s.revokeCredential)
+	v.GET("/projects/:projectId/environments/:envId/configurations/draft", s.userAuth(), s.getDraft)
+	v.PUT("/projects/:projectId/environments/:envId/configurations/draft", s.userAuth(), s.putDraft)
+	v.POST("/projects/:projectId/environments/:envId/configurations/publish", s.userAuth(), s.publishConfig)
+	v.GET("/projects/:projectId/environments/:envId/configurations/versions", s.userAuth(), s.listConfigVersions)
+	v.POST("/players/register", s.rateLimit(), s.registerPlayer)
+	v.POST("/players/login", s.rateLimit(), s.loginPlayer)
+	v.POST("/players/refresh", s.refreshPlayer)
+	v.GET("/players/me", s.playerAuth(), s.getMe)
+	v.PATCH("/players/me", s.playerAuth(), s.patchMe)
+	v.GET("/players/me/inventory", s.playerAuth(), s.getInventory)
+	v.GET("/players/me/inventory/:itemKey", s.playerAuth(), s.getInventoryItem)
+	v.POST("/players/me/inventory/consume", s.playerAuth(), s.consumeItem)
+	v.POST("/players/me/inventory/equip", s.playerAuth(), s.equipItem)
+	v.POST("/players/me/inventory/unequip", s.playerAuth(), s.unequipItem)
+	v.GET("/players/me/currency", s.playerAuth(), s.getBalances)
+	v.POST("/players/me/currency/spend", s.playerAuth(), s.spendCurrency)
+	v.GET("/players/me/transactions", s.playerAuth(), s.getTransactions)
+	v.GET("/players/me/progression", s.playerAuth(), s.getProgression)
+	v.POST("/server/players/:playerId/items/grant", s.serverAuth(), s.grantItem)
+	v.POST("/server/players/:playerId/currency/credit", s.serverAuth(), s.creditCurrency)
+	v.POST("/server/players/:playerId/xp/award", s.serverAuth(), s.awardXP)
+	v.POST("/leaderboards/:key/scores", s.playerAuth(), s.submitScore)
+	v.GET("/leaderboards/:key", s.publicScope(), s.getLeaderboard)
+}
+
+func success(c *gin.Context, status int, data any) {
+	c.JSON(status, gin.H{"data": data, "meta": gin.H{"request_id": c.GetString("request_id")}})
+}
+func failure(c *gin.Context, status int, code, message string) {
+	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"code": code, "message": message}, "meta": gin.H{"request_id": c.GetString("request_id")}})
+}
+func badRequest(c *gin.Context) {
+	failure(c, 400, "INVALID_REQUEST", "The request body or fields are invalid.")
+}
+func notFound(c *gin.Context) { failure(c, 404, "NOT_FOUND", "The requested resource was not found.") }
+func internal(c *gin.Context, err error) {
+	slog.Error("request failed", "request_id", c.GetString("request_id"), "error", err)
+	failure(c, 500, "INTERNAL_ERROR", "An unexpected error occurred.")
+}
+func bind(c *gin.Context, dst any) bool {
+	if err := c.ShouldBindJSON(dst); err != nil {
+		badRequest(c)
+		return false
+	}
+	return true
+}
+func (s *Server) userAuth() gin.HandlerFunc   { return s.jwtAuth("user") }
+func (s *Server) playerAuth() gin.HandlerFunc { return s.jwtAuth("player") }
+func (s *Server) jwtAuth(kind string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		p, ok := s.readJWT(c.GetHeader("Authorization"), kind)
+		if !ok {
+			failure(c, 401, "UNAUTHORIZED", "A valid access token is required.")
+			return
+		}
+		c.Set("principal", p)
+		c.Next()
+	}
+}
+
+func (s *Server) readJWT(header, kind string) (principal, bool) {
+	var p principal
+	parts := strings.SplitN(header, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return p, false
+	}
+	t := strings.Split(parts[1], ".")
+	if len(t) != 3 {
+		return p, false
+	}
+	signature := hmacText(s.cfg.JWTSecret, t[0]+"."+t[1])
+	if subtle.ConstantTimeCompare([]byte(signature), []byte(t[2])) != 1 {
+		return p, false
+	}
+	b, err := base64.RawURLEncoding.DecodeString(t[1])
+	if err != nil {
+		return p, false
+	}
+	var claims map[string]any
+	if json.Unmarshal(b, &claims) != nil {
+		return p, false
+	}
+	exp, ok := claims["exp"].(float64)
+	if !ok || time.Now().Unix() >= int64(exp) {
+		return p, false
+	}
+	p.ID, _ = claims["sub"].(string)
+	p.ProjectID, _ = claims["project_id"].(string)
+	p.EnvironmentID, _ = claims["environment_id"].(string)
+	p.Kind, _ = claims["kind"].(string)
+	return p, p.ID != "" && p.Kind == kind
+}
+func (s *Server) token(p principal, ttl time.Duration) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload, _ := json.Marshal(gin.H{"sub": p.ID, "kind": p.Kind, "project_id": p.ProjectID, "environment_id": p.EnvironmentID, "exp": time.Now().Add(ttl).Unix()})
+	body := header + "." + base64.RawURLEncoding.EncodeToString(payload)
+	return body + "." + hmacText(s.cfg.JWTSecret, body)
+}
+func hmacText(secret, msg string) string {
+	h := hmac.New(sha256.New, []byte(secret))
+	_, _ = h.Write([]byte(msg))
+	return base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+}
+func (s *Server) serverAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := strings.TrimSpace(c.GetHeader("X-Server-Credential"))
+		if key == "" {
+			failure(c, 401, "UNAUTHORIZED", "A server credential is required.")
+			return
+		}
+		parts := strings.SplitN(key, ".", 2)
+		if len(parts) != 2 {
+			failure(c, 401, "UNAUTHORIZED", "The server credential is invalid.")
+			return
+		}
+		var p principal
+		var hash string
+		err := s.db.QueryRow(c, `SELECT project_id::text,environment_id::text,secret_hash FROM server_credentials WHERE key_prefix=$1 AND revoked_at IS NULL`, parts[0]).Scan(&p.ProjectID, &p.EnvironmentID, &hash)
+		if err != nil || !secureHash(hash, parts[1]) {
+			failure(c, 401, "UNAUTHORIZED", "The server credential is invalid.")
+			return
+		}
+		p.Kind = "server"
+		p.ID = parts[0]
+		c.Set("principal", p)
+		c.Next()
+	}
+}
+func (s *Server) publicScope() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if p, ok := s.readJWT(c.GetHeader("Authorization"), "player"); ok {
+			c.Set("principal", p)
+			c.Set("scope", p)
+			c.Next()
+			return
+		}
+		if p, ok := c.Get("principal"); ok {
+			c.Set("scope", p.(principal))
+			c.Next()
+			return
+		}
+		public := c.GetHeader("X-Public-Environment")
+		if public == "" {
+			public = c.Query("environment_id")
+		}
+		var p principal
+		err := s.db.QueryRow(c, `SELECT project_id::text,id::text FROM environments WHERE public_id=$1`, public).Scan(&p.ProjectID, &p.EnvironmentID)
+		if err != nil {
+			failure(c, 404, "NOT_FOUND", "The public environment was not found.")
+			return
+		}
+		p.Kind = "public"
+		c.Set("scope", p)
+		c.Next()
+	}
+}
+func getPrincipal(c *gin.Context) principal { p, _ := c.Get("principal"); return p.(principal) }
+func randomID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(b[:])
+}
+func randomSecret(n int) string {
+	b := make([]byte, n)
+	if _, e := rand.Read(b); e != nil {
+		return randomID()
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+func digest(v string) string { h := sha256.Sum256([]byte(v)); return hex.EncodeToString(h[:]) }
+func secureHash(stored, raw string) bool {
+	return subtle.ConstantTimeCompare([]byte(stored), []byte(digest(raw))) == 1
+}
+func normalizeEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
+func validSlug(s string) bool            { return regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,48}$`).MatchString(s) }
+func ownerProject(c *gin.Context, db *pgxpool.Pool, projectID string) bool {
+	p := getPrincipal(c)
+	var exists bool
+	err := db.QueryRow(c, `SELECT EXISTS(SELECT 1 FROM projects WHERE id=$1 AND owner_user_id=$2)`, projectID, p.ID).Scan(&exists)
+	return err == nil && exists
+}
+func (s *Server) ownedEnvironment(c *gin.Context) (string, string, bool) {
+	projectID, envID := c.Param("projectId"), c.Param("envId")
+	if !ownerProject(c, s.db, projectID) {
+		notFound(c)
+		return "", "", false
+	}
+	var exists bool
+	err := s.db.QueryRow(c, `SELECT EXISTS(SELECT 1 FROM environments WHERE id=$1 AND project_id=$2)`, envID, projectID).Scan(&exists)
+	if err != nil || !exists {
+		notFound(c)
+		return "", "", false
+	}
+	return projectID, envID, true
+}
+
+func (s *Server) registerUser(c *gin.Context) {
+	var in struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if !bind(c, &in) {
+		return
+	}
+	in.Email = normalizeEmail(in.Email)
+	if len(in.Email) < 5 || len(in.Email) > 254 || len(in.Password) < 10 || len(in.Password) > 128 {
+		failure(c, 422, "VALIDATION_ERROR", "Email or password does not meet requirements.")
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	var id string
+	err = s.db.QueryRow(c, `INSERT INTO users(email,password_hash) VALUES($1,$2) RETURNING id::text`, in.Email, string(hash)).Scan(&id)
+	if err != nil {
+		if strings.Contains(err.Error(), "unique") {
+			failure(c, 409, "CONFLICT", "An account with that email already exists.")
+			return
+		}
+		internal(c, err)
+		return
+	}
+	success(c, 201, gin.H{"user": gin.H{"id": id, "email": in.Email}, "access_token": s.token(principal{ID: id, Kind: "user"}, s.cfg.AccessTTL), "token_type": "Bearer"})
+}
+func (s *Server) loginUser(c *gin.Context) {
+	var in struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if !bind(c, &in) {
+		return
+	}
+	var id, hash string
+	err := s.db.QueryRow(c, `SELECT id::text,password_hash FROM users WHERE email=$1`, normalizeEmail(in.Email)).Scan(&id, &hash)
+	if err != nil || bcrypt.CompareHashAndPassword([]byte(hash), []byte(in.Password)) != nil {
+		failure(c, 401, "INVALID_CREDENTIALS", "Email or password is incorrect.")
+		return
+	}
+	success(c, 200, gin.H{"user": gin.H{"id": id, "email": normalizeEmail(in.Email)}, "access_token": s.token(principal{ID: id, Kind: "user"}, s.cfg.AccessTTL), "token_type": "Bearer"})
+}
+
+func (s *Server) listProjects(c *gin.Context) {
+	p := getPrincipal(c)
+	rows, err := s.db.Query(c, `SELECT id::text,name,slug,created_at FROM projects WHERE owner_user_id=$1 ORDER BY created_at`, p.ID)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	defer rows.Close()
+	out := []gin.H{}
+	for rows.Next() {
+		var id, name, slug string
+		var created time.Time
+		if rows.Scan(&id, &name, &slug, &created) == nil {
+			out = append(out, gin.H{"id": id, "name": name, "slug": slug, "created_at": created})
+		}
+	}
+	success(c, 200, out)
+}
+func (s *Server) createProject(c *gin.Context) {
+	var in struct {
+		Name string `json:"name"`
+		Slug string `json:"slug"`
+	}
+	if !bind(c, &in) {
+		return
+	}
+	in.Slug = strings.ToLower(strings.TrimSpace(in.Slug))
+	in.Name = strings.TrimSpace(in.Name)
+	if len(in.Name) < 1 || len(in.Name) > 100 || !validSlug(in.Slug) {
+		failure(c, 422, "VALIDATION_ERROR", "A project name and valid slug are required.")
+		return
+	}
+	p := getPrincipal(c)
+	tx, err := s.db.Begin(c)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	defer tx.Rollback(c)
+	var id, envID, public string
+	if err = tx.QueryRow(c, `INSERT INTO projects(owner_user_id,name,slug) VALUES($1,$2,$3) RETURNING id::text`, p.ID, in.Name, in.Slug).Scan(&id); err != nil {
+		failure(c, 409, "CONFLICT", "Project slug is already in use.")
+		return
+	}
+	public = "pub_" + randomSecret(18)
+	if err = tx.QueryRow(c, `INSERT INTO environments(project_id,name,public_id) VALUES($1,'development',$2) RETURNING id::text`, id, public).Scan(&envID); err != nil {
+		internal(c, err)
+		return
+	}
+	_, err = tx.Exec(c, `INSERT INTO configuration_drafts(project_id,environment_id) VALUES($1,$2)`, id, envID)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	if err = tx.Commit(c); err != nil {
+		internal(c, err)
+		return
+	}
+	success(c, 201, gin.H{"id": id, "name": in.Name, "slug": in.Slug, "environments": []gin.H{{"id": envID, "name": "development", "public_id": public}}})
+}
+func (s *Server) getProject(c *gin.Context) {
+	p := getPrincipal(c)
+	var id, name, slug string
+	err := s.db.QueryRow(c, `SELECT id::text,name,slug FROM projects WHERE id=$1 AND owner_user_id=$2`, c.Param("projectId"), p.ID).Scan(&id, &name, &slug)
+	if err != nil {
+		notFound(c)
+		return
+	}
+	success(c, 200, gin.H{"id": id, "name": name, "slug": slug})
+}
+func (s *Server) updateProject(c *gin.Context) {
+	var in struct {
+		Name *string `json:"name"`
+		Slug *string `json:"slug"`
+	}
+	if !bind(c, &in) {
+		return
+	}
+	p := getPrincipal(c)
+	if !ownerProject(c, s.db, c.Param("projectId")) {
+		notFound(c)
+		return
+	}
+	name, slug := "", ""
+	if in.Name != nil {
+		name = strings.TrimSpace(*in.Name)
+		if name == "" || len(name) > 100 {
+			failure(c, 422, "VALIDATION_ERROR", "Invalid project name.")
+			return
+		}
+	}
+	if in.Slug != nil {
+		slug = strings.ToLower(strings.TrimSpace(*in.Slug))
+		if !validSlug(slug) {
+			failure(c, 422, "VALIDATION_ERROR", "Invalid project slug.")
+			return
+		}
+	}
+	_, err := s.db.Exec(c, `UPDATE projects SET name=COALESCE(NULLIF($1,''),name),slug=COALESCE(NULLIF($2,''),slug) WHERE id=$3 AND owner_user_id=$4`, name, slug, c.Param("projectId"), p.ID)
+	if err != nil {
+		failure(c, 409, "CONFLICT", "Project slug is already in use.")
+		return
+	}
+	s.getProject(c)
+}
+func (s *Server) deleteProject(c *gin.Context) {
+	p := getPrincipal(c)
+	tag, err := s.db.Exec(c, `DELETE FROM projects WHERE id=$1 AND owner_user_id=$2`, c.Param("projectId"), p.ID)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		notFound(c)
+		return
+	}
+	success(c, 200, gin.H{"deleted": true})
+}
+func (s *Server) listEnvironments(c *gin.Context) {
+	if !ownerProject(c, s.db, c.Param("projectId")) {
+		notFound(c)
+		return
+	}
+	rows, err := s.db.Query(c, `SELECT id::text,name,public_id,created_at FROM environments WHERE project_id=$1 ORDER BY name`, c.Param("projectId"))
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	defer rows.Close()
+	out := []gin.H{}
+	for rows.Next() {
+		var id, n, pub string
+		var at time.Time
+		if rows.Scan(&id, &n, &pub, &at) == nil {
+			out = append(out, gin.H{"id": id, "name": n, "public_id": pub, "created_at": at})
+		}
+	}
+	success(c, 200, out)
+}
+func (s *Server) createEnvironment(c *gin.Context) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if !bind(c, &in) {
+		return
+	}
+	if in.Name != "development" && in.Name != "production" {
+		failure(c, 422, "VALIDATION_ERROR", "Environment must be development or production.")
+		return
+	}
+	p := getPrincipal(c)
+	projectID := c.Param("projectId")
+	if !ownerProject(c, s.db, projectID) {
+		notFound(c)
+		return
+	}
+	pub := "pub_" + randomSecret(18)
+	var id string
+	err := s.db.QueryRow(c, `INSERT INTO environments(project_id,name,public_id) VALUES($1,$2,$3) RETURNING id::text`, projectID, in.Name, pub).Scan(&id)
+	if err != nil {
+		failure(c, 409, "CONFLICT", "That environment already exists.")
+		return
+	}
+	_, err = s.db.Exec(c, `INSERT INTO configuration_drafts(project_id,environment_id) VALUES($1,$2)`, projectID, id)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	_ = p
+	success(c, 201, gin.H{"id": id, "project_id": projectID, "name": in.Name, "public_id": pub})
+}
+func (s *Server) issueCredential(c *gin.Context) {
+	projectID, envID, ok := s.ownedEnvironment(c)
+	if !ok {
+		return
+	}
+	raw := randomSecret(36)
+	prefix := "rs_" + randomID()[:12]
+	var id string
+	err := s.db.QueryRow(c, `INSERT INTO server_credentials(project_id,environment_id,key_prefix,secret_hash) VALUES($1,$2,$3,$4) RETURNING id::text`, projectID, envID, prefix, digest(raw)).Scan(&id)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	success(c, 201, gin.H{"id": id, "credential": prefix + "." + raw, "warning": "Store this credential securely; it is shown only once."})
+}
+func (s *Server) listCredentials(c *gin.Context) {
+	projectID, envID, ok := s.ownedEnvironment(c)
+	if !ok {
+		return
+	}
+	rows, err := s.db.Query(c, `SELECT id::text,key_prefix,created_at,revoked_at FROM server_credentials WHERE project_id=$1 AND environment_id=$2 ORDER BY created_at DESC`, projectID, envID)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	defer rows.Close()
+	out := []gin.H{}
+	for rows.Next() {
+		var id, prefix string
+		var created time.Time
+		var revoked *time.Time
+		if err := rows.Scan(&id, &prefix, &created, &revoked); err != nil {
+			internal(c, err)
+			return
+		}
+		entry := gin.H{"id": id, "key_prefix": prefix, "created_at": created}
+		if revoked != nil {
+			entry["revoked_at"] = revoked
+		}
+		out = append(out, entry)
+	}
+	if err = rows.Err(); err != nil {
+		internal(c, err)
+		return
+	}
+	success(c, 200, out)
+}
+func (s *Server) revokeCredential(c *gin.Context) {
+	p := getPrincipal(c)
+	tag, err := s.db.Exec(c, `UPDATE server_credentials sc SET revoked_at=now() FROM projects pr WHERE sc.id=$1 AND sc.project_id=pr.id AND pr.owner_user_id=$2 AND sc.revoked_at IS NULL`, c.Param("id"), p.ID)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		notFound(c)
+		return
+	}
+	success(c, 200, gin.H{"revoked": true})
+}
+
+func (s *Server) getDraft(c *gin.Context) {
+	projectID, envID, ok := s.ownedEnvironment(c)
+	if !ok {
+		return
+	}
+	var config json.RawMessage
+	if err := s.db.QueryRow(c, `SELECT config FROM configuration_drafts WHERE project_id=$1 AND environment_id=$2`, projectID, envID).Scan(&config); err != nil {
+		internal(c, err)
+		return
+	}
+	success(c, 200, json.RawMessage(config))
+}
+func (s *Server) putDraft(c *gin.Context) {
+	projectID, envID, ok := s.ownedEnvironment(c)
+	if !ok {
+		return
+	}
+	var raw json.RawMessage
+	if err := c.ShouldBindJSON(&raw); err != nil || len(raw) == 0 {
+		badRequest(c)
+		return
+	}
+	var config map[string]json.RawMessage
+	if json.Unmarshal(raw, &config) != nil {
+		badRequest(c)
+		return
+	}
+	for _, key := range []string{"items", "currencies", "progression", "leaderboards"} {
+		if _, ok := config[key]; !ok {
+			config[key] = json.RawMessage("[]")
+		}
+	}
+	b, err := json.Marshal(config)
+	if err != nil {
+		badRequest(c)
+		return
+	}
+	_, err = s.db.Exec(c, `INSERT INTO configuration_drafts(project_id,environment_id,config,updated_at) VALUES($1,$2,$3,now()) ON CONFLICT(project_id,environment_id) DO UPDATE SET config=EXCLUDED.config,updated_at=now()`, projectID, envID, b)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	success(c, 200, json.RawMessage(b))
+}
+func (s *Server) publishConfig(c *gin.Context) {
+	projectID, envID, ok := s.ownedEnvironment(c)
+	if !ok {
+		return
+	}
+	tx, err := s.db.Begin(c)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	defer tx.Rollback(c)
+	var raw []byte
+	err = tx.QueryRow(c, `SELECT config FROM configuration_drafts WHERE project_id=$1 AND environment_id=$2 FOR UPDATE`, projectID, envID).Scan(&raw)
+	if err != nil {
+		notFound(c)
+		return
+	}
+	var cfg runtimeConfig
+	if json.Unmarshal(raw, &cfg) != nil || validateConfig(cfg) != nil {
+		failure(c, 422, "INVALID_CONFIGURATION", "Draft configuration is invalid.")
+		return
+	}
+	var version int
+	err = tx.QueryRow(c, `SELECT COALESCE(MAX(version),0)+1 FROM configuration_versions WHERE project_id=$1 AND environment_id=$2`, projectID, envID).Scan(&version)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	_, err = tx.Exec(c, `INSERT INTO configuration_versions(project_id,environment_id,version,config) VALUES($1,$2,$3,$4)`, projectID, envID, version, raw)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	if err = s.applyRuntimeConfig(c, tx, projectID, envID, version, cfg); err != nil {
+		internal(c, err)
+		return
+	}
+	if err = tx.Commit(c); err != nil {
+		internal(c, err)
+		return
+	}
+	success(c, 201, gin.H{"version": version, "published_at": time.Now().UTC()})
+}
+func (s *Server) listConfigVersions(c *gin.Context) {
+	projectID, envID, ok := s.ownedEnvironment(c)
+	if !ok {
+		return
+	}
+	rows, err := s.db.Query(c, `SELECT id::text,version,config,created_at FROM configuration_versions WHERE project_id=$1 AND environment_id=$2 ORDER BY version DESC`, projectID, envID)
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	defer rows.Close()
+	out := []gin.H{}
+	for rows.Next() {
+		var id string
+		var version int
+		var raw []byte
+		var at time.Time
+		if rows.Scan(&id, &version, &raw, &at) == nil {
+			out = append(out, gin.H{"id": id, "version": version, "config": json.RawMessage(raw), "published_at": at})
+		}
+	}
+	success(c, 200, out)
+}
+
+type itemConfig struct {
+	Key       string         `json:"key"`
+	Name      string         `json:"name"`
+	Category  string         `json:"category"`
+	Stackable bool           `json:"stackable"`
+	MaxStack  int            `json:"max_stack"`
+	Metadata  map[string]any `json:"metadata"`
+}
+type currencyConfig struct {
+	Key  string `json:"key"`
+	Name string `json:"name"`
+}
+type leaderboardConfig struct {
+	Key         string     `json:"key"`
+	Direction   string     `json:"direction"`
+	SeasonStart *time.Time `json:"season_start"`
+	SeasonEnd   *time.Time `json:"season_end"`
+}
+type runtimeConfig struct {
+	Items        []itemConfig        `json:"items"`
+	Currencies   []currencyConfig    `json:"currencies"`
+	Progression  []int64             `json:"progression"`
+	Leaderboards []leaderboardConfig `json:"leaderboards"`
+}
+
+var keyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+var requestIDPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+func validateConfig(cfg runtimeConfig) error {
+	if len(cfg.Items) > 500 || len(cfg.Currencies) > 100 || len(cfg.Progression) == 0 || len(cfg.Progression) > 1000 {
+		return errors.New("configuration limits")
+	}
+	seen := map[string]bool{}
+	for _, x := range cfg.Items {
+		if !keyPattern.MatchString(x.Key) || strings.TrimSpace(x.Name) == "" || len(x.Name) > 100 || len(x.Category) > 64 || seen["i"+x.Key] || x.MaxStack < 1 || x.MaxStack > 100000 || (!x.Stackable && x.MaxStack != 1) {
+			return errors.New("invalid item")
+		}
+		seen["i"+x.Key] = true
+	}
+	for _, x := range cfg.Currencies {
+		if !keyPattern.MatchString(x.Key) || strings.TrimSpace(x.Name) == "" || len(x.Name) > 100 || seen["c"+x.Key] {
+			return errors.New("invalid currency")
+		}
+		seen["c"+x.Key] = true
+	}
+	for i, x := range cfg.Progression {
+		if x < 0 || (i > 0 && x <= cfg.Progression[i-1]) {
+			return errors.New("invalid progression thresholds")
+		}
+	}
+	for _, x := range cfg.Leaderboards {
+		if !keyPattern.MatchString(x.Key) || seen["l"+x.Key] || (x.Direction != "higher" && x.Direction != "lower") || (x.SeasonStart != nil && x.SeasonEnd != nil && !x.SeasonStart.Before(*x.SeasonEnd)) {
+			return errors.New("invalid leaderboard")
+		}
+		seen["l"+x.Key] = true
+	}
+	return nil
+}
+func (s *Server) applyRuntimeConfig(c *gin.Context, tx pgx.Tx, p, e string, version int, cfg runtimeConfig) error {
+	_, err := tx.Exec(c, `UPDATE item_definitions SET active=false WHERE project_id=$1 AND environment_id=$2`, p, e)
+	if err != nil {
+		return err
+	}
+	for _, x := range cfg.Items {
+		meta, _ := json.Marshal(x.Metadata)
+		if len(meta) == 0 {
+			meta = []byte("{}")
+		}
+		_, err = tx.Exec(c, `INSERT INTO item_definitions(project_id,environment_id,item_key,name,category,stackable,max_stack,metadata,active) VALUES($1,$2,$3,$4,$5,$6,$7,$8,true) ON CONFLICT(project_id,environment_id,item_key) DO UPDATE SET name=EXCLUDED.name,category=EXCLUDED.category,stackable=EXCLUDED.stackable,max_stack=EXCLUDED.max_stack,metadata=EXCLUDED.metadata,active=true`, p, e, x.Key, x.Name, x.Category, x.Stackable, x.MaxStack, meta)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(c, `UPDATE currency_definitions SET active=false WHERE project_id=$1 AND environment_id=$2`, p, e)
+	if err != nil {
+		return err
+	}
+	for _, x := range cfg.Currencies {
+		_, err = tx.Exec(c, `INSERT INTO currency_definitions(project_id,environment_id,currency_key,name,active) VALUES($1,$2,$3,$4,true) ON CONFLICT(project_id,environment_id,currency_key) DO UPDATE SET name=EXCLUDED.name,active=true`, p, e, x.Key, x.Name)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(c, `UPDATE leaderboard_definitions SET active=false WHERE project_id=$1 AND environment_id=$2`, p, e)
+	if err != nil {
+		return err
+	}
+	for _, x := range cfg.Leaderboards {
+		_, err = tx.Exec(c, `INSERT INTO leaderboard_definitions(project_id,environment_id,key,score_direction,season_start,season_end,active) VALUES($1,$2,$3,$4,$5,$6,true) ON CONFLICT(project_id,environment_id,key) DO UPDATE SET score_direction=EXCLUDED.score_direction,season_start=EXCLUDED.season_start,season_end=EXCLUDED.season_end,active=true`, p, e, x.Key, x.Direction, x.SeasonStart, x.SeasonEnd)
+		if err != nil {
+			return err
+		}
+	}
+	thresholds, _ := json.Marshal(cfg.Progression)
+	_, err = tx.Exec(c, `INSERT INTO progression_versions(project_id,environment_id,version,thresholds) VALUES($1,$2,$3,$4)`, p, e, version, thresholds)
+	return err
+}
