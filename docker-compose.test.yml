@@ -28,7 +28,7 @@ services:
     command: >
       sh -c "if [ -n \"$$(gofmt -l .)\" ]; then echo 'gofmt needed:'; gofmt -l .; exit 1; fi;
              go vet ./... &&
-             go test -count=1 -coverprofile=/tmp/coverage.out ./... &&
+             go test -count=1 -coverpkg=./internal/... -coverprofile=/tmp/coverage.out ./... &&
              go tool cover -func=/tmp/coverage.out | tail -1"
     depends_on:
       test-db:

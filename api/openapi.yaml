@@ -1,0 +1,4483 @@
+# RealmStack API contract (OpenAPI 3.0). Hand-maintained: update it with every route change.
+# TestOpenAPICoversEveryRoute fails when routes and this file disagree; the frontend
+# generates src/api/generated/schema.ts from it (npm run generate:api).
+openapi: "3.0.3"
+info:
+  title: "RealmStack API"
+  version: "0.5.0"
+  description: "Multi-tenant game backend. Every response uses {data, meta}; every error uses {error:{code,message,details}, meta}. Mutations require an Idempotency-Key: a replay returns the stored result and status, a different request with the same key returns 409. This document is the API contract: the frontend generates its client from it, and a backend test fails if a route is missing here."
+servers:
+  - url: "http://localhost:8080"
+tags:
+  - name: platform
+  - name: dashboard
+  - name: projects
+  - name: configuration
+  - name: players
+  - name: inventory
+  - name: economy
+  - name: progression
+  - name: leaderboards
+  - name: stats
+  - name: achievements
+paths:
+  "/healthz":
+    get:
+      operationId: getHealthz
+      tags:
+        - platform
+      summary: "Liveness check."
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Health"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+  "/v1/auth/register":
+    post:
+      operationId: postAuthRegister
+      tags:
+        - dashboard
+      summary: "Create a dashboard user (rate limited)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/Credentials"
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/UserSession"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+        "429":
+          "$ref": "#/components/responses/E429"
+  "/v1/auth/login":
+    post:
+      operationId: postAuthLogin
+      tags:
+        - dashboard
+      summary: "Sign in a dashboard user (rate limited)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/Credentials"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/UserSession"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "422":
+          "$ref": "#/components/responses/E422"
+        "429":
+          "$ref": "#/components/responses/E429"
+  "/v1/projects":
+    get:
+      operationId: getProjects
+      tags:
+        - projects
+      summary: "List owned projects."
+      security:
+        - userBearer: []
+      parameters:
+        - name: include_archived
+          in: query
+          required: false
+          description: "Also list archived projects."
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/Project"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    post:
+      operationId: postProjects
+      tags:
+        - projects
+      summary: "Create a project with a development environment."
+      security:
+        - userBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/ProjectCreate"
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Project"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}":
+    get:
+      operationId: getProjectsByProjectid
+      tags:
+        - projects
+      summary: "Read an owned project."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Project"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    patch:
+      operationId: patchProjectsByProjectid
+      tags:
+        - projects
+      summary: "Rename, re-slug, archive or restore a project."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/ProjectUpdate"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Project"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments":
+    get:
+      operationId: getProjectsByProjectidEnvironments
+      tags:
+        - projects
+      summary: "List a project's environments."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/Environment"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    post:
+      operationId: postProjectsByProjectidEnvironments
+      tags:
+        - projects
+      summary: "Add the development or production environment."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/EnvironmentCreate"
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Environment"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/credentials":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidCredentials
+      tags:
+        - projects
+      summary: "List server credential metadata (never secrets)."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/Credential"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    post:
+      operationId: postProjectsByProjectidEnvironmentsByEnvidCredentials
+      tags:
+        - projects
+      summary: "Issue a server credential; the secret is returned once."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/IssuedCredential"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/credentials/{id}/revoke":
+    post:
+      operationId: postCredentialsByIdRevoke
+      tags:
+        - projects
+      summary: "Revoke a server credential."
+      security:
+        - userBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: "Credential ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Revoked"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/configurations/draft":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidConfigurationsDraft
+      tags:
+        - configuration
+      summary: "Read the configuration draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Configuration"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    put:
+      operationId: putProjectsByProjectidEnvironmentsByEnvidConfigurationsDraft
+      tags:
+        - configuration
+      summary: "Replace the whole draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/Configuration"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Configuration"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/configurations/validate":
+    post:
+      operationId: postProjectsByProjectidEnvironmentsByEnvidConfigurationsValidate
+      tags:
+        - configuration
+      summary: "Validate the supplied body, or the stored draft when the body is empty, without saving."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/Configuration"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/ValidationResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/configurations/publish":
+    post:
+      operationId: postProjectsByProjectidEnvironmentsByEnvidConfigurationsPublish
+      tags:
+        - configuration
+      summary: "Publish the draft as an immutable version (422 INVALID_CONFIGURATION lists field errors)."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/PublishResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/configurations/versions":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidConfigurationsVersions
+      tags:
+        - configuration
+      summary: "List published versions, newest first."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/ConfigurationVersion"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/projects/{projectId}/environments/{envId}/configurations/published":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidConfigurationsPublished
+      tags:
+        - configuration
+      summary: "Read the live configuration (version null when nothing is published)."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/PublishedConfiguration"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/projects/{projectId}/environments/{envId}/progression":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidProgression
+      tags:
+        - configuration
+      summary: "Read the draft's XP thresholds."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Thresholds"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    put:
+      operationId: putProjectsByProjectidEnvironmentsByEnvidProgression
+      tags:
+        - configuration
+      summary: "Replace the draft's XP thresholds (levels 2+)."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/Thresholds"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Thresholds"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/achievements/stats":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidAchievementsStats
+      tags:
+        - achievements
+      summary: "Claim counts per published achievement. No player identifiers."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/AchievementStat"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/projects/{projectId}/environments/{envId}/items":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidItems
+      tags:
+        - configuration
+      summary: "List items in the draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/ItemDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    post:
+      operationId: postProjectsByProjectidEnvironmentsByEnvidItems
+      tags:
+        - configuration
+      summary: "Add a item to the draft (409 if the key exists)."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/ItemDefinition"
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/ItemDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/items/{key}":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidItemsByKey
+      tags:
+        - configuration
+      summary: "Read a draft item."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/ItemDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    put:
+      operationId: putProjectsByProjectidEnvironmentsByEnvidItemsByKey
+      tags:
+        - configuration
+      summary: "Replace a draft item; the body key may be omitted."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/ItemDefinition"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/ItemDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+    delete:
+      operationId: deleteProjectsByProjectidEnvironmentsByEnvidItemsByKey
+      tags:
+        - configuration
+      summary: "Remove a item from the draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Deleted"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/currencies":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidCurrencies
+      tags:
+        - configuration
+      summary: "List currencies in the draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/CurrencyDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    post:
+      operationId: postProjectsByProjectidEnvironmentsByEnvidCurrencies
+      tags:
+        - configuration
+      summary: "Add a currency to the draft (409 if the key exists)."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/CurrencyDefinition"
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/CurrencyDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/currencies/{key}":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidCurrenciesByKey
+      tags:
+        - configuration
+      summary: "Read a draft currency."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/CurrencyDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    put:
+      operationId: putProjectsByProjectidEnvironmentsByEnvidCurrenciesByKey
+      tags:
+        - configuration
+      summary: "Replace a draft currency; the body key may be omitted."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/CurrencyDefinition"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/CurrencyDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+    delete:
+      operationId: deleteProjectsByProjectidEnvironmentsByEnvidCurrenciesByKey
+      tags:
+        - configuration
+      summary: "Remove a currency from the draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Deleted"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/leaderboards":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidLeaderboards
+      tags:
+        - configuration
+      summary: "List leaderboards in the draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/LeaderboardDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    post:
+      operationId: postProjectsByProjectidEnvironmentsByEnvidLeaderboards
+      tags:
+        - configuration
+      summary: "Add a leaderboard to the draft (409 if the key exists)."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/LeaderboardDefinition"
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/LeaderboardDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/leaderboards/{key}":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidLeaderboardsByKey
+      tags:
+        - configuration
+      summary: "Read a draft leaderboard."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/LeaderboardDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    put:
+      operationId: putProjectsByProjectidEnvironmentsByEnvidLeaderboardsByKey
+      tags:
+        - configuration
+      summary: "Replace a draft leaderboard; the body key may be omitted."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/LeaderboardDefinition"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/LeaderboardDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+    delete:
+      operationId: deleteProjectsByProjectidEnvironmentsByEnvidLeaderboardsByKey
+      tags:
+        - configuration
+      summary: "Remove a leaderboard from the draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Deleted"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/stats":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidStats
+      tags:
+        - configuration
+      summary: "List stats in the draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/StatDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    post:
+      operationId: postProjectsByProjectidEnvironmentsByEnvidStats
+      tags:
+        - configuration
+      summary: "Add a stat to the draft (409 if the key exists)."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/StatDefinition"
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/StatDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/stats/{key}":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidStatsByKey
+      tags:
+        - configuration
+      summary: "Read a draft stat."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/StatDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    put:
+      operationId: putProjectsByProjectidEnvironmentsByEnvidStatsByKey
+      tags:
+        - configuration
+      summary: "Replace a draft stat; the body key may be omitted."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/StatDefinition"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/StatDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+    delete:
+      operationId: deleteProjectsByProjectidEnvironmentsByEnvidStatsByKey
+      tags:
+        - configuration
+      summary: "Remove a stat from the draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Deleted"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/achievements":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidAchievements
+      tags:
+        - configuration
+      summary: "List achievements in the draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/AchievementDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    post:
+      operationId: postProjectsByProjectidEnvironmentsByEnvidAchievements
+      tags:
+        - configuration
+      summary: "Add a achievement to the draft (409 if the key exists)."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/AchievementDefinition"
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/AchievementDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/achievements/{key}":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidAchievementsByKey
+      tags:
+        - configuration
+      summary: "Read a draft achievement."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/AchievementDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    put:
+      operationId: putProjectsByProjectidEnvironmentsByEnvidAchievementsByKey
+      tags:
+        - configuration
+      summary: "Replace a draft achievement; the body key may be omitted."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/AchievementDefinition"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/AchievementDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+    delete:
+      operationId: deleteProjectsByProjectidEnvironmentsByEnvidAchievementsByKey
+      tags:
+        - configuration
+      summary: "Remove a achievement from the draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Deleted"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/players/register":
+    post:
+      operationId: postPlayersRegister
+      tags:
+        - players
+      summary: "Register a player in the environment selected by its public identifier (rate limited)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/PlayerRegister"
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/PlayerSession"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+        "429":
+          "$ref": "#/components/responses/E429"
+  "/v1/players/login":
+    post:
+      operationId: postPlayersLogin
+      tags:
+        - players
+      summary: "Sign a player in (rate limited)."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/PlayerLogin"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/PlayerSession"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "422":
+          "$ref": "#/components/responses/E422"
+        "429":
+          "$ref": "#/components/responses/E429"
+  "/v1/players/refresh":
+    post:
+      operationId: postPlayersRefresh
+      tags:
+        - players
+      summary: "Rotate a refresh token; reusing a rotated token revokes its family."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/TokenPair"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/players/me":
+    get:
+      operationId: getPlayersMe
+      tags:
+        - players
+      summary: "Read the player's profile."
+      security:
+        - playerBearer: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Profile"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    patch:
+      operationId: patchPlayersMe
+      tags:
+        - players
+      summary: "Update display name and/or metadata."
+      security:
+        - playerBearer: []
+      parameters:
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/ProfileUpdate"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Profile"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/players/me/inventory":
+    get:
+      operationId: getPlayersMeInventory
+      tags:
+        - inventory
+      summary: "List owned stacks."
+      security:
+        - playerBearer: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/InventoryItem"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/players/me/inventory/{itemKey}":
+    get:
+      operationId: getPlayersMeInventoryByItemkey
+      tags:
+        - inventory
+      summary: "Read one owned stack."
+      security:
+        - playerBearer: []
+      parameters:
+        - name: itemKey
+          in: path
+          required: true
+          description: "Item key."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/InventoryItem"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/players/me/inventory/consume":
+    post:
+      operationId: postPlayersMeInventoryConsume
+      tags:
+        - inventory
+      summary: "Consume owned items."
+      security:
+        - playerBearer: []
+      parameters:
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/ItemMutation"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/ConsumeResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/players/me/inventory/equip":
+    post:
+      operationId: postPlayersMeInventoryEquip
+      tags:
+        - inventory
+      summary: "Equip an owned item in its slot."
+      security:
+        - playerBearer: []
+      parameters:
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/EquipRequest"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/EquipResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/players/me/inventory/unequip":
+    post:
+      operationId: postPlayersMeInventoryUnequip
+      tags:
+        - inventory
+      summary: "Empty an equipment slot."
+      security:
+        - playerBearer: []
+      parameters:
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/UnequipRequest"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/UnequipResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/players/me/currency":
+    get:
+      operationId: getPlayersMeCurrency
+      tags:
+        - economy
+      summary: "Read balances."
+      security:
+        - playerBearer: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/Balance"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/players/me/currency/spend":
+    post:
+      operationId: postPlayersMeCurrencySpend
+      tags:
+        - economy
+      summary: "Spend currency (422 INSUFFICIENT_FUNDS)."
+      security:
+        - playerBearer: []
+      parameters:
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/CurrencyMutation"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/CurrencyResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/players/me/transactions":
+    get:
+      operationId: getPlayersMeTransactions
+      tags:
+        - economy
+      summary: "Economy history, newest first, cursor-paginated."
+      security:
+        - playerBearer: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: "Page size (default 50)."
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+        - name: cursor
+          in: query
+          required: false
+          description: "meta.next_cursor from the previous page."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/Transaction"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/players/me/progression":
+    get:
+      operationId: getPlayersMeProgression
+      tags:
+        - progression
+      summary: "Read XP and level."
+      security:
+        - playerBearer: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Progression"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/players/me/stats":
+    get:
+      operationId: getPlayersMeStats
+      tags:
+        - stats
+      summary: "Read own counters and flags."
+      security:
+        - playerBearer: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/PlayerStats"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/players/me/achievements":
+    get:
+      operationId: getPlayersMeAchievements
+      tags:
+        - achievements
+      summary: "List achievements with progress; hidden incomplete ones are masked."
+      security:
+        - playerBearer: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/PlayerAchievement"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/players/me/achievements/{key}/claim":
+    post:
+      operationId: postPlayersMeAchievementsByKeyClaim
+      tags:
+        - achievements
+      summary: "Claim a completed achievement with claim policy player."
+      security:
+        - playerBearer: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/ClaimResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "403":
+          "$ref": "#/components/responses/E403"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/server/players/{playerId}/items/grant":
+    post:
+      operationId: postServerPlayersByPlayeridItemsGrant
+      tags:
+        - inventory
+      summary: "Grant items."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/ItemMutation"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/GrantResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/server/players/{playerId}/currency/credit":
+    post:
+      operationId: postServerPlayersByPlayeridCurrencyCredit
+      tags:
+        - economy
+      summary: "Credit currency."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/CurrencyMutation"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/CurrencyResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/server/players/{playerId}/xp/award":
+    post:
+      operationId: postServerPlayersByPlayeridXpAward
+      tags:
+        - progression
+      summary: "Award XP."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/XPAward"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/XPAwardResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/server/players/{playerId}/stats":
+    get:
+      operationId: getServerPlayersByPlayeridStats
+      tags:
+        - stats
+      summary: "Read a player's counters and flags."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/PlayerStats"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/server/players/{playerId}/stats/{statKey}/increment":
+    post:
+      operationId: postServerPlayersByPlayeridStatsByStatkeyIncrement
+      tags:
+        - stats
+      summary: "Increment a counter by a positive amount."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+        - name: statKey
+          in: path
+          required: true
+          description: "Counter key."
+          schema:
+            type: string
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/StatWrite"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/StatIncrementResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/server/players/{playerId}/flags/{flagKey}/set":
+    post:
+      operationId: postServerPlayersByPlayeridFlagsByFlagkeySet
+      tags:
+        - stats
+      summary: "Set a flag (set-only). The body is optional."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+        - name: flagKey
+          in: path
+          required: true
+          description: "Flag key."
+          schema:
+            type: string
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/FlagWrite"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/FlagSetResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/server/players/{playerId}/achievements":
+    get:
+      operationId: getServerPlayersByPlayeridAchievements
+      tags:
+        - achievements
+      summary: "A player's achievements, unmasked."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/PlayerAchievement"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/server/players/{playerId}/achievements/{key}/claim":
+    post:
+      operationId: postServerPlayersByPlayeridAchievementsByKeyClaim
+      tags:
+        - achievements
+      summary: "Claim any completed achievement on the player's behalf."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/ClaimResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/leaderboards/{key}/scores":
+    post:
+      operationId: postLeaderboardsByKeyScores
+      tags:
+        - leaderboards
+      summary: "Submit a score."
+      security:
+        - playerBearer: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/ScoreSubmit"
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/ScoreResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/leaderboards/{key}":
+    get:
+      operationId: getLeaderboardsByKey
+      tags:
+        - leaderboards
+      summary: "Top entries, plus the caller's rank with a player token."
+      security:
+        - playerBearer: []
+        - publicEnvironment: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: "Definition, leaderboard or achievement key."
+          schema:
+            type: string
+        - name: environment_id
+          in: query
+          required: false
+          description: "Public environment identifier (or use the X-Public-Environment header or a player token)."
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: "Entries to return (default 10)."
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/LeaderboardView"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+components:
+  securitySchemes:
+    userBearer:
+      type: http
+      scheme: bearer
+      description: "Dashboard user access token."
+    playerBearer:
+      type: http
+      scheme: bearer
+      description: "Player access token."
+    serverCredential:
+      type: apiKey
+      in: header
+      name: X-Server-Credential
+      description: "Trusted game-server credential (prefix.secret). Never ship it in a client."
+    publicEnvironment:
+      type: apiKey
+      in: header
+      name: X-Public-Environment
+      description: "Public environment identifier. Selects scope; it is not a secret."
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: "Identifies one logical operation; reuse it only when retrying that operation."
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+  responses:
+    E400:
+      description: "Malformed request or missing Idempotency-Key."
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/ErrorResponse"
+    E401:
+      description: "Missing or invalid authentication."
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/ErrorResponse"
+    E403:
+      description: "Not permitted."
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/ErrorResponse"
+    E404:
+      description: "Not found in the caller's scope."
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/ErrorResponse"
+    E409:
+      description: "Idempotency key reused with a different request, or conflicting state."
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/ErrorResponse"
+    E422:
+      description: "Business rule failed; validation errors carry details.errors."
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/ErrorResponse"
+    E429:
+      description: "Rate limited."
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/ErrorResponse"
+  schemas:
+    Meta:
+      type: object
+      properties:
+        request_id:
+          type: string
+        next_cursor:
+          type: string
+          description: "Present when another page exists; pass as ?cursor=."
+      required:
+        - request_id
+    FieldError:
+      type: object
+      properties:
+        field:
+          type: string
+          example: "items[2].max_stack"
+        message:
+          type: string
+      required:
+        - field
+        - message
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: INSUFFICIENT_FUNDS
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+              properties:
+                errors:
+                  type: array
+                  items:
+                    "$ref": "#/components/schemas/FieldError"
+              description: "Validation failures list field-level problems in errors."
+          required:
+            - code
+            - message
+            - details
+        meta:
+          "$ref": "#/components/schemas/Meta"
+      required:
+        - error
+        - meta
+    Health:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    Credentials:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+      required:
+        - email
+        - password
+    UserSession:
+      type: object
+      properties:
+        user:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            email:
+              type: string
+          required:
+            - id
+            - email
+        access_token:
+          type: string
+        token_type:
+          type: string
+          enum:
+            - Bearer
+      required:
+        - user
+        - access_token
+        - token_type
+    Environment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          enum:
+            - development
+            - production
+        public_id:
+          type: string
+        project_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - public_id
+    EnvironmentCreate:
+      type: object
+      properties:
+        name:
+          type: string
+          enum:
+            - development
+            - production
+      required:
+        - name
+    Project:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - archived
+        created_at:
+          type: string
+          format: date-time
+        archived_at:
+          type: string
+          format: date-time
+        environments:
+          type: array
+          items:
+            "$ref": "#/components/schemas/Environment"
+      required:
+        - id
+        - name
+        - slug
+        - status
+    ProjectCreate:
+      type: object
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+      required:
+        - name
+        - slug
+    ProjectUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - archived
+          description: "Archive or restore. Projects are never deleted."
+    Credential:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        key_prefix:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - key_prefix
+        - created_at
+    IssuedCredential:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        credential:
+          type: string
+          description: "prefix.secret, shown only once."
+        warning:
+          type: string
+      required:
+        - id
+        - credential
+        - warning
+    Revoked:
+      type: object
+      properties:
+        revoked:
+          type: boolean
+      required:
+        - revoked
+    ItemDefinition:
+      type: object
+      properties:
+        key:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+        name:
+          type: string
+        category:
+          type: string
+        stackable:
+          type: boolean
+        max_stack:
+          type: integer
+        metadata:
+          type: object
+          additionalProperties: true
+          description: "Free-form; a string metadata.slot makes the item equippable in that slot."
+      required:
+        - key
+        - name
+        - max_stack
+    CurrencyDefinition:
+      type: object
+      properties:
+        key:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+        name:
+          type: string
+      required:
+        - key
+        - name
+    LeaderboardDefinition:
+      type: object
+      properties:
+        key:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+        direction:
+          type: string
+          enum:
+            - higher
+            - lower
+        season_start:
+          type: string
+          format: date-time
+          nullable: true
+        season_end:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - key
+        - direction
+    StatDefinition:
+      type: object
+      properties:
+        key:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+        name:
+          type: string
+        kind:
+          type: string
+          enum:
+            - counter
+            - flag
+      required:
+        - key
+        - name
+        - kind
+    Condition:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - xp_total
+            - level_reached
+            - item_granted
+            - item_consumed
+            - currency_earned
+            - currency_spent
+            - leaderboard_score
+            - stat
+            - flag
+        item_key:
+          type: string
+        currency_key:
+          type: string
+        leaderboard_key:
+          type: string
+        stat_key:
+          type: string
+        flag_key:
+          type: string
+        target:
+          type: integer
+          format: int64
+      required:
+        - type
+      description: "A declarative goal condition. Each type accepts only its own fields; an omitted item_key on item_granted/item_consumed means any item."
+    ItemReward:
+      type: object
+      properties:
+        item_key:
+          type: string
+        quantity:
+          type: integer
+          format: int64
+      required:
+        - item_key
+        - quantity
+    CurrencyReward:
+      type: object
+      properties:
+        currency_key:
+          type: string
+        amount:
+          type: integer
+          format: int64
+      required:
+        - currency_key
+        - amount
+    Rewards:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            "$ref": "#/components/schemas/ItemReward"
+        currencies:
+          type: array
+          items:
+            "$ref": "#/components/schemas/CurrencyReward"
+        xp:
+          type: integer
+          format: int64
+    AchievementDefinition:
+      type: object
+      properties:
+        key:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+        name:
+          type: string
+        description:
+          type: string
+        hidden:
+          type: boolean
+        conditions:
+          type: array
+          items:
+            "$ref": "#/components/schemas/Condition"
+          minItems: 1
+          maxItems: 5
+        rewards:
+          "$ref": "#/components/schemas/Rewards"
+        claimable_by:
+          type: string
+          enum:
+            - player
+            - server
+          default: player
+      required:
+        - key
+        - name
+        - conditions
+    Configuration:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            "$ref": "#/components/schemas/ItemDefinition"
+        currencies:
+          type: array
+          items:
+            "$ref": "#/components/schemas/CurrencyDefinition"
+        progression:
+          type: array
+          items:
+            type: integer
+            format: int64
+        leaderboards:
+          type: array
+          items:
+            "$ref": "#/components/schemas/LeaderboardDefinition"
+        stats:
+          type: array
+          items:
+            "$ref": "#/components/schemas/StatDefinition"
+        achievements:
+          type: array
+          items:
+            "$ref": "#/components/schemas/AchievementDefinition"
+      required:
+        - items
+        - currencies
+        - progression
+        - leaderboards
+        - stats
+        - achievements
+      additionalProperties: true
+      description: "A configuration draft or published version. Extra keys (such as editor_layout) are kept but ignored by publishing."
+    Thresholds:
+      type: object
+      properties:
+        thresholds:
+          type: array
+          items:
+            type: integer
+            format: int64
+      required:
+        - thresholds
+    ValidationResult:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        errors:
+          type: array
+          items:
+            "$ref": "#/components/schemas/FieldError"
+      required:
+        - valid
+        - errors
+    PublishResult:
+      type: object
+      properties:
+        version:
+          type: integer
+        published_at:
+          type: string
+          format: date-time
+        progression_version:
+          type: integer
+        progression_version_created:
+          type: boolean
+      required:
+        - version
+        - published_at
+        - progression_version
+        - progression_version_created
+    ConfigurationVersion:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+        config:
+          "$ref": "#/components/schemas/Configuration"
+        published_at:
+          type: string
+          format: date-time
+        published_by:
+          type: string
+          format: uuid
+      required:
+        - id
+        - version
+        - config
+        - published_at
+    PublishedConfiguration:
+      type: object
+      properties:
+        version:
+          type: integer
+          nullable: true
+        config:
+          allOf:
+            - "$ref": "#/components/schemas/Configuration"
+          nullable: true
+        published_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - version
+        - config
+        - published_at
+    Deleted:
+      type: object
+      properties:
+        deleted:
+          type: boolean
+        key:
+          type: string
+      required:
+        - deleted
+        - key
+    PlayerRegister:
+      type: object
+      properties:
+        public_environment_id:
+          type: string
+        environment_id:
+          type: string
+          description: "Alias of public_environment_id; internal UUIDs are not accepted."
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+        display_name:
+          type: string
+      required:
+        - email
+        - password
+    PlayerLogin:
+      type: object
+      properties:
+        public_environment_id:
+          type: string
+        environment_id:
+          type: string
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+      required:
+        - email
+        - password
+    PlayerSession:
+      type: object
+      properties:
+        player:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            email:
+              type: string
+            display_name:
+              type: string
+          required:
+            - id
+            - display_name
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+        expires_in:
+          type: integer
+      required:
+        - player
+        - access_token
+        - refresh_token
+        - token_type
+        - expires_in
+    RefreshRequest:
+      type: object
+      properties:
+        refresh_token:
+          type: string
+      required:
+        - refresh_token
+    TokenPair:
+      type: object
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+        expires_in:
+          type: integer
+      required:
+        - access_token
+        - refresh_token
+        - token_type
+        - expires_in
+    Profile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        display_name:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+      required:
+        - id
+        - email
+        - display_name
+        - metadata
+    ProfileUpdate:
+      type: object
+      properties:
+        display_name:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+    InventoryItem:
+      type: object
+      properties:
+        item_key:
+          type: string
+        name:
+          type: string
+        category:
+          type: string
+        quantity:
+          type: integer
+          format: int64
+        metadata:
+          type: object
+          additionalProperties: true
+        equipped_slot:
+          type: string
+      required:
+        - item_key
+        - name
+        - category
+        - quantity
+        - metadata
+        - equipped_slot
+    ItemMutation:
+      type: object
+      properties:
+        item_key:
+          type: string
+        quantity:
+          type: integer
+          format: int64
+        reason:
+          type: string
+        reference:
+          type: string
+      required:
+        - item_key
+        - quantity
+    GrantResult:
+      type: object
+      properties:
+        item_key:
+          type: string
+        operation:
+          type: string
+        quantity:
+          type: integer
+          format: int64
+        owned:
+          type: integer
+          format: int64
+      required:
+        - item_key
+        - operation
+        - quantity
+        - owned
+    ConsumeResult:
+      type: object
+      properties:
+        item_key:
+          type: string
+        consumed:
+          type: integer
+          format: int64
+        remaining:
+          type: integer
+          format: int64
+        unequipped:
+          type: boolean
+      required:
+        - item_key
+        - consumed
+        - remaining
+        - unequipped
+    EquipRequest:
+      type: object
+      properties:
+        item_key:
+          type: string
+        slot:
+          type: string
+      required:
+        - item_key
+        - slot
+    EquipResult:
+      type: object
+      properties:
+        slot:
+          type: string
+        item_key:
+          type: string
+      required:
+        - slot
+        - item_key
+    UnequipRequest:
+      type: object
+      properties:
+        slot:
+          type: string
+      required:
+        - slot
+    UnequipResult:
+      type: object
+      properties:
+        slot:
+          type: string
+        equipped:
+          type: boolean
+      required:
+        - slot
+        - equipped
+    Balance:
+      type: object
+      properties:
+        currency_key:
+          type: string
+        name:
+          type: string
+        balance:
+          type: integer
+          format: int64
+      required:
+        - currency_key
+        - name
+        - balance
+    CurrencyMutation:
+      type: object
+      properties:
+        currency_key:
+          type: string
+        amount:
+          type: integer
+          format: int64
+        reason:
+          type: string
+        reference:
+          type: string
+      required:
+        - currency_key
+        - amount
+    CurrencyResult:
+      type: object
+      properties:
+        currency_key:
+          type: string
+        operation:
+          type: string
+        amount:
+          type: integer
+          format: int64
+        balance:
+          type: integer
+          format: int64
+      required:
+        - currency_key
+        - operation
+        - amount
+        - balance
+    Transaction:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        operation:
+          type: string
+          enum:
+            - grant
+            - consume
+            - credit
+            - spend
+        amount:
+          type: integer
+          format: int64
+        balance:
+          type: integer
+          format: int64
+        currency_key:
+          type: string
+        item_key:
+          type: string
+        reason:
+          type: string
+        reference:
+          type: string
+        source:
+          type: string
+          enum:
+            - api
+            - achievement
+            - quest
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - operation
+        - amount
+        - balance
+        - currency_key
+        - item_key
+        - reason
+        - reference
+        - source
+        - created_at
+    Progression:
+      type: object
+      properties:
+        total_xp:
+          type: integer
+          format: int64
+        level:
+          type: integer
+        version:
+          type: integer
+          nullable: true
+        thresholds:
+          type: array
+          items:
+            type: integer
+            format: int64
+      required:
+        - total_xp
+        - level
+        - version
+    XPAward:
+      type: object
+      properties:
+        amount:
+          type: integer
+          format: int64
+        reason:
+          type: string
+        reference:
+          type: string
+      required:
+        - amount
+    XPAwardResult:
+      type: object
+      properties:
+        total_xp:
+          type: integer
+          format: int64
+        awarded:
+          type: integer
+          format: int64
+        level:
+          type: integer
+        leveled_up:
+          type: boolean
+        progression_version:
+          type: integer
+        progression_version_id:
+          type: string
+          format: uuid
+      required:
+        - total_xp
+        - awarded
+        - level
+        - leveled_up
+        - progression_version
+        - progression_version_id
+    ScoreSubmit:
+      type: object
+      properties:
+        score:
+          type: integer
+          format: int64
+      required:
+        - score
+    ScoreResult:
+      type: object
+      properties:
+        leaderboard_key:
+          type: string
+        score:
+          type: integer
+          format: int64
+        submitted_at:
+          type: string
+          format: date-time
+      required:
+        - leaderboard_key
+        - score
+        - submitted_at
+    LeaderboardEntry:
+      type: object
+      properties:
+        player_id:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+        score:
+          type: integer
+          format: int64
+        rank:
+          type: integer
+          format: int64
+        submitted_at:
+          type: string
+          format: date-time
+      required:
+        - player_id
+        - display_name
+        - score
+        - rank
+        - submitted_at
+    LeaderboardView:
+      type: object
+      properties:
+        key:
+          type: string
+        entries:
+          type: array
+          items:
+            "$ref": "#/components/schemas/LeaderboardEntry"
+        player_rank:
+          type: integer
+          format: int64
+        player_score:
+          type: integer
+          format: int64
+      required:
+        - key
+        - entries
+    StatWrite:
+      type: object
+      properties:
+        amount:
+          type: integer
+          format: int64
+        reason:
+          type: string
+        reference:
+          type: string
+      required:
+        - amount
+    FlagWrite:
+      type: object
+      properties:
+        reason:
+          type: string
+        reference:
+          type: string
+    StatIncrementResult:
+      type: object
+      properties:
+        stat_key:
+          type: string
+        incremented:
+          type: integer
+          format: int64
+        value:
+          type: integer
+          format: int64
+      required:
+        - stat_key
+        - incremented
+        - value
+    FlagSetResult:
+      type: object
+      properties:
+        flag_key:
+          type: string
+        set:
+          type: boolean
+        newly_set:
+          type: boolean
+      required:
+        - flag_key
+        - set
+        - newly_set
+    PlayerStats:
+      type: object
+      properties:
+        counters:
+          type: array
+          items:
+            type: object
+            properties:
+              key:
+                type: string
+              name:
+                type: string
+              value:
+                type: integer
+                format: int64
+            required:
+              - key
+              - name
+              - value
+        flags:
+          type: array
+          items:
+            type: object
+            properties:
+              key:
+                type: string
+              name:
+                type: string
+              set:
+                type: boolean
+            required:
+              - key
+              - name
+              - set
+      required:
+        - counters
+        - flags
+    ConditionProgress:
+      type: object
+      properties:
+        type:
+          type: string
+        current:
+          type: integer
+          format: int64
+        target:
+          type: integer
+          format: int64
+        met:
+          type: boolean
+        has_value:
+          type: boolean
+          description: "False for a leaderboard_score condition with no score yet."
+      required:
+        - type
+        - current
+        - target
+        - met
+        - has_value
+    PlayerAchievement:
+      type: object
+      properties:
+        key:
+          type: string
+        hidden:
+          type: boolean
+        status:
+          type: string
+          enum:
+            - in_progress
+            - completed
+            - claimed
+        claimable_by:
+          type: string
+          enum:
+            - player
+            - server
+        claimed_at:
+          type: string
+          format: date-time
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        conditions:
+          type: array
+          items:
+            "$ref": "#/components/schemas/Condition"
+          nullable: true
+        rewards:
+          allOf:
+            - "$ref": "#/components/schemas/Rewards"
+          nullable: true
+        progress:
+          type: array
+          items:
+            "$ref": "#/components/schemas/ConditionProgress"
+          nullable: true
+      required:
+        - key
+        - hidden
+        - status
+        - claimable_by
+        - claimed_at
+        - name
+        - description
+        - conditions
+        - rewards
+        - progress
+      description: "For players, a hidden achievement that is still in progress has name, description, conditions, rewards and progress set to null."
+    ClaimResult:
+      type: object
+      properties:
+        key:
+          type: string
+        status:
+          type: string
+          enum:
+            - claimed
+        claimed_by:
+          type: string
+          enum:
+            - player
+            - server
+        claimed_at:
+          type: string
+          format: date-time
+        rewards:
+          "$ref": "#/components/schemas/Rewards"
+      required:
+        - key
+        - status
+        - claimed_by
+        - claimed_at
+        - rewards
+    AchievementStat:
+      type: object
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+        hidden:
+          type: boolean
+        claims:
+          type: integer
+          format: int64
+        claimed_by_player:
+          type: integer
+          format: int64
+        claimed_by_server:
+          type: integer
+          format: int64
+      required:
+        - key
+        - name
+        - hidden
+        - claims
+        - claimed_by_player
+        - claimed_by_server

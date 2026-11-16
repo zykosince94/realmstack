@@ -1,4 +1,4 @@
-package app
+package httpapi
 
 // PostgreSQL integration tests. They exercise the real HTTP handlers against a real
 // database and are skipped unless TEST_DATABASE_URL is set. Run them with:
@@ -24,6 +24,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"realmstack-backend/internal/demo"
+	"realmstack-backend/internal/persistence"
+	"realmstack-backend/internal/platform"
 )
 
 var extensionOnce sync.Once
@@ -44,7 +47,7 @@ func testDB(t *testing.T) *pgxpool.Pool {
 			t.Fatalf("create extension: %v", err)
 		}
 	})
-	schema := "test_" + randomID()[:16]
+	schema := "test_" + platform.RandomID()[:16]
 	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
@@ -63,7 +66,7 @@ func testDB(t *testing.T) *pgxpool.Pool {
 		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
 		admin.Close()
 	})
-	if err = MigrateDir(ctx, pool, "../../migrations"); err != nil {
+	if err = persistence.MigrateDir(ctx, pool, "../../migrations"); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return pool
@@ -234,11 +237,11 @@ func (f *fixture) playerPost(token, path, key string, body any) apiResult {
 }
 
 func (f *fixture) grant(playerID, item string, qty int) apiResult {
-	return f.server("/v1/server/players/"+playerID+"/items/grant", "grant-"+randomID(), map[string]any{"item_key": item, "quantity": qty})
+	return f.server("/v1/server/players/"+playerID+"/items/grant", "grant-"+platform.RandomID(), map[string]any{"item_key": item, "quantity": qty})
 }
 
 func (f *fixture) credit(playerID, currency string, amount int) apiResult {
-	return f.server("/v1/server/players/"+playerID+"/currency/credit", "credit-"+randomID(), map[string]any{"currency_key": currency, "amount": amount})
+	return f.server("/v1/server/players/"+playerID+"/currency/credit", "credit-"+platform.RandomID(), map[string]any{"currency_key": currency, "amount": amount})
 }
 
 func (f *fixture) count(query string, args ...any) int {
@@ -487,7 +490,7 @@ func TestIntegrationLeaderboards(t *testing.T) {
 	}
 	submit := func(p player, board string, score int) {
 		t.Helper()
-		expect(t, f.playerPost(p.token, "/v1/leaderboards/"+board+"/scores", "s-"+randomID(), map[string]any{"score": score}), 201)
+		expect(t, f.playerPost(p.token, "/v1/leaderboards/"+board+"/scores", "s-"+platform.RandomID(), map[string]any{"score": score}), 201)
 	}
 	// Player 0 and 1 tie on 500; player 0 got there first. Player 2 has a lower best.
 	submit(players[0], "global", 200)
@@ -557,13 +560,13 @@ func TestIntegrationDemoSeedIsIdempotentAndReconciles(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	if err := SeedDemo(ctx, db, logger); err != nil {
+	if err := demo.Seed(ctx, db, logger); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(ctx, `UPDATE configuration_drafts SET config=jsonb_set(config,'{progression}','[10,20]')`); err != nil {
 		t.Fatal(err)
 	}
-	if err := SeedDemo(ctx, db, logger); err != nil {
+	if err := demo.Seed(ctx, db, logger); err != nil {
 		t.Fatalf("second seed: %v", err)
 	}
 	f := &fixture{t: t, db: db}
@@ -582,10 +585,10 @@ func TestIntegrationDemoSeedIsIdempotentAndReconciles(t *testing.T) {
 
 	// The seeded credentials work end to end.
 	h := newServer(t, db).Handler()
-	login := expect(t, call(t, h, "POST", "/v1/players/login", map[string]any{"public_environment_id": DemoPublicEnvironment, "email": DemoPlayerEmail, "password": DemoPlayerPassword}, nil), 200).obj(t)
+	login := expect(t, call(t, h, "POST", "/v1/players/login", map[string]any{"public_environment_id": demo.DemoPublicEnvironment, "email": demo.DemoPlayerEmail, "password": demo.DemoPlayerPassword}, nil), 200).obj(t)
 	playerID := login["player"].(map[string]any)["id"].(string)
 	expect(t, call(t, h, "POST", "/v1/server/players/"+playerID+"/currency/credit", map[string]any{"currency_key": "gems", "amount": 5},
-		map[string]string{"X-Server-Credential": DemoServerCredential, "Idempotency-Key": "seed-check"}), 200)
+		map[string]string{"X-Server-Credential": demo.DemoServerCredential, "Idempotency-Key": "seed-check"}), 200)
 }
 
 func TestIntegrationDashboardProjectsAndAuth(t *testing.T) {
@@ -795,7 +798,7 @@ func TestIntegrationConcurrentSameKeyAndStackLimit(t *testing.T) {
 func TestIntegrationRefreshTokenExpiry(t *testing.T) {
 	f := newFixture(t)
 	srv := newServer(t, f.db)
-	srv.now = func() time.Time { return time.Now().Add(2 * time.Hour) } // past the 1h refresh TTL
+	srv.Env.Now = func() time.Time { return time.Now().Add(2 * time.Hour) } // past the 1h refresh TTL
 	r := expect(t, call(t, srv.Handler(), "POST", "/v1/players/refresh", map[string]any{"refresh_token": f.refresh}, nil), 401)
 	if r.Error.Code != "INVALID_REFRESH_TOKEN" {
 		t.Fatalf("code=%s", r.Error.Code)
@@ -815,9 +818,9 @@ func TestIntegrationSeasonBoundaries(t *testing.T) {
 
 	srv := newServer(t, f.db)
 	submitAt := func(at time.Time, score int) apiResult {
-		srv.now = func() time.Time { return at }
-		token := srv.token(principal{ID: f.playerID, ProjectID: f.projectID, EnvironmentID: f.envID, Kind: "player"}, time.Minute)
-		return call(t, srv.Handler(), "POST", "/v1/leaderboards/season-1/scores", map[string]any{"score": score}, withKey(bearer(token), "s-"+randomID()))
+		srv.Env.Now = func() time.Time { return at }
+		token := srv.Env.Token(platform.Principal{ID: f.playerID, ProjectID: f.projectID, EnvironmentID: f.envID, Kind: "player"}, time.Minute)
+		return call(t, srv.Handler(), "POST", "/v1/leaderboards/season-1/scores", map[string]any{"score": score}, withKey(bearer(token), "s-"+platform.RandomID()))
 	}
 	expect(t, submitAt(start.Add(-time.Nanosecond), 1), 422) // before start
 	expect(t, submitAt(start, 10), 201)                      // start is inclusive
@@ -863,7 +866,7 @@ func TestIntegrationPublishFieldErrorsAndValidate(t *testing.T) {
 	var envelope struct {
 		Error struct {
 			Details struct {
-				Errors []FieldError `json:"errors"`
+				Errors []platform.FieldError `json:"errors"`
 			} `json:"details"`
 		} `json:"error"`
 	}
@@ -1052,4 +1055,13 @@ func TestIntegrationPlayerReadsAndProfile(t *testing.T) {
 	if me["metadata"].(map[string]any)["title"] != "Pathfinder" {
 		t.Fatalf("metadata not stored: %v", me)
 	}
+}
+
+// fields returns the field paths of validation errors.
+func fields(errs []platform.FieldError) []string {
+	out := make([]string, len(errs))
+	for i, e := range errs {
+		out[i] = e.Field
+	}
+	return out
 }

@@ -1,6 +1,33 @@
 # RealmStack backend
 
-A Go/Gin modular monolith backed by PostgreSQL. It provides dashboard authentication and tenant-owned projects/environments, hashed/revocable server credentials, player registration and rotating refresh tokens, published environment configuration, inventory/economy, pinned XP progression, and PostgreSQL leaderboards. Redis and AI features are not included.
+A Go/Gin modular monolith backed by PostgreSQL. It provides dashboard authentication and tenant-owned projects/environments, hashed/revocable server credentials, player registration and rotating refresh tokens, published environment configuration, inventory/economy, pinned XP progression, PostgreSQL leaderboards, server-reported stats and flags, and achievements on a shared goal engine. Redis, quests and AI features are not included yet.
+
+**The API contract is [`api/openapi.yaml`](api/openapi.yaml).** Every route is documented there, `TestOpenAPICoversEveryRoute` fails when routes and the document disagree, and the frontend generates its TypeScript client from it. Update it in the same change as any route.
+
+## Code layout
+
+```text
+cmd/api/                 process startup: config, pool, migrations, demo seed, graceful shutdown
+internal/platform/       envelopes, typed API errors, principal, tokens, Mutate (idempotency), tenancy helpers
+internal/httpapi/        Gin engine, middleware, authentication, the route table; integration tests
+internal/persistence/    migration runner (advisory-locked)
+internal/auth/           dashboard users
+internal/projects/       projects, environments, server credentials, ownership middleware
+internal/catalog/        configuration drafts, field-level validation, publishing, definition sync
+internal/players/        player identity, refresh-token rotation, profile
+internal/inventory/      item stacks and equipment (Grant is reused by goal rewards)
+internal/economy/        balances and history (Credit/Spend are reused by goal rewards)
+internal/progression/    XP, levels, version pinning (AwardXP is reused by goal rewards)
+internal/leaderboards/   score submissions and deterministic ranking
+internal/stats/          server-reported counters and flags
+internal/goals/          shared goal engine: conditions, validation, LoadFacts/Evaluate, ApplyRewards
+internal/achievements/   achievement progress, hidden masking, claims, claim statistics
+internal/demo/           local demo seed
+migrations/              numbered SQL files
+api/openapi.yaml         API contract
+```
+
+Packages import `platform` and each other only downward (`achievements` → `goals` → `inventory`/`economy`/`progression` → `platform`), so there are no cycles; `httpapi` wires everything together.
 
 This folder is an independent Git repository. The integrated Compose setup is owned by the sibling `realmstack-frontend/` repository and builds this API from the sibling path; keep both repositories side-by-side to run the full dashboard + API demo. The Go source walkthrough is in `../study/realmstack-backend-guide.html` when using the original workspace.
 
@@ -72,22 +99,30 @@ Replace `PLAYER_UUID` with the `player.id` returned at login or registration. Fo
 
 Definition edits change only the draft:
 
-* `GET|POST /v1/projects/{projectId}/environments/{envId}/items`, `GET|PUT|DELETE .../items/{key}` (likewise `currencies` and `leaderboards`). Bodies are validated and unknown fields are rejected.
+* `GET|POST /v1/projects/{projectId}/environments/{envId}/items`, `GET|PUT|DELETE .../items/{key}` (likewise `currencies`, `leaderboards`, `stats` and `achievements`). Bodies are validated and unknown fields are rejected; a single achievement is shape-checked here and its references are checked by validate and publish.
 * `GET|PUT /v1/projects/{projectId}/environments/{envId}/progression` with `{"thresholds":[100,300,700]}`.
 * `POST .../configurations/validate` validates the request body, or the stored draft when the body is empty, and returns `{"valid":bool,"errors":[...]}` without saving.
 
-Publishing validates the whole draft and answers `422 INVALID_CONFIGURATION` with every field error. It records who published each version. A new progression version is created only when the thresholds change. The direction and season of a leaderboard that already has scores cannot change; start a new season with a new leaderboard key.
+* `GET /v1/projects/{projectId}/environments/{envId}/achievements/stats` returns claim counts per published achievement (no player identifiers).
 
-Draft JSON has `items`, `currencies`, `progression` (increasing XP thresholds to reach levels 2+), and `leaderboards` arrays. Example:
+Publishing validates the whole draft and answers `422 INVALID_CONFIGURATION` with every field error, such as `achievements[2].conditions[0].stat_key`. It records who published each version. A new progression version is created only when the thresholds change. The direction and season of a leaderboard that already has scores cannot change; start a new season with a new leaderboard key. Likewise a stat cannot switch between counter and flag once values were recorded.
+
+Draft JSON has `items`, `currencies`, `progression` (increasing XP thresholds to reach levels 2+), `leaderboards`, `stats` and `achievements` arrays. Example:
 
 ```json
 {
   "items":[{"key":"health_potion","name":"Health Potion","category":"consumable","stackable":true,"max_stack":99,"metadata":{"healing":50}}],
   "currencies":[{"key":"credits","name":"Credits"}],
   "progression":[100,300,700],
-  "leaderboards":[{"key":"global","direction":"higher"}]
+  "leaderboards":[{"key":"global","direction":"higher"}],
+  "stats":[{"key":"trolls_defeated","name":"Trolls defeated","kind":"counter"},{"key":"talked_to_elder","name":"Talked to the elder","kind":"flag"}],
+  "achievements":[{"key":"troll_slayer","name":"Troll Slayer","description":"Defeat 100 trolls.","hidden":false,
+    "conditions":[{"type":"stat","stat_key":"trolls_defeated","target":100},{"type":"flag","flag_key":"talked_to_elder"}],
+    "rewards":{"currencies":[{"currency_key":"credits","amount":10}],"xp":50},"claimable_by":"player"}]
 }
 ```
+
+Achievement conditions come from a closed set: `xp_total`, `level_reached`, `item_granted`, `item_consumed` (omit `item_key` for any item), `currency_earned`, `currency_spent`, `leaderboard_score`, `stat` and `flag`. Each type accepts only its own fields; 1–5 conditions, all must be met. Progress is computed on read from the immutable ledgers, counting only rows with `source='api'`, so rewards paid by a claim never complete another goal. `level_reached` uses the player's pinned curve and API-awarded XP for the same reason (a deliberate reading of spec 6.4).
 
 Supported leaderboard directions are `higher` and `lower`. Optional `season_start` (inclusive UTC RFC3339 timestamp) and `season_end` (exclusive) may be specified on a leaderboard; omit both for an unseasoned board. Publishing stores an immutable config/progression version and atomically switches active definitions. Existing players retain their originally pinned progression version.
 
@@ -99,6 +134,9 @@ Supported leaderboard directions are `higher` and `lower`. Optional `season_star
 * `POST /v1/players/me/inventory/consume|equip|unequip` (equip, unequip, and consume require an idempotency key)
 * `GET /v1/players/me/currency`; `POST /v1/players/me/currency/spend`; `GET /v1/players/me/transactions?limit=50` (newest first; pass `meta.next_cursor` as `?cursor=` for the next page)
 * `GET /v1/players/me/progression`
+* `GET /v1/players/me/stats` (own counters and flags)
+* `GET /v1/players/me/achievements` (status `in_progress` / `completed` / `claimed` with per-condition progress; a hidden achievement still in progress shows only its key and status)
+* `POST /v1/players/me/achievements/{key}/claim` (claim policy `player` only; `409 ALREADY_CLAIMED`, `422 NOT_COMPLETED`, `403 CLAIM_NOT_ALLOWED`)
 * `POST /v1/leaderboards/{key}/scores`; `GET /v1/leaderboards/{key}?environment_id={public_environment_id}&limit=10`
 
 ### Trusted server APIs (environment-scoped credential)
@@ -108,8 +146,10 @@ Supply `X-Server-Credential: {credential}`:
 * `POST /v1/server/players/{playerId}/items/grant`
 * `POST /v1/server/players/{playerId}/currency/credit`
 * `POST /v1/server/players/{playerId}/xp/award`
+* `GET /v1/server/players/{playerId}/stats`; `POST .../stats/{statKey}/increment` (`{"amount":3}`, positive only); `POST .../flags/{flagKey}/set` (body optional; set-only)
+* `GET /v1/server/players/{playerId}/achievements` (unmasked); `POST .../achievements/{key}/claim` (any claim policy)
 
-The configured item/currency definitions must be published before use. Grant/consume quantities and credit/spend amounts must be positive. Economy and XP writes use a transaction, scoped idempotency record, and immutable ledger entry. A key replay with the same normalized request returns the saved result; reuse with a different payload yields HTTP 409.
+The configured item/currency definitions must be published before use. Grant/consume quantities and credit/spend amounts must be positive. Economy, XP, stat and claim writes use one transaction, a scoped idempotency record and an immutable ledger entry (`platform.Env.Mutate`). A claim pays every reward with the normal stack and balance rules; if any reward fails (for example a full stack) the whole claim rolls back. A key replay with the same normalized request returns the saved result; reuse with a different payload yields HTTP 409.
 
 ## Configuration and checks
 

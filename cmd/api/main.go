@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"realmstack-backend/internal/app"
+	"realmstack-backend/internal/demo"
+	"realmstack-backend/internal/httpapi"
+	"realmstack-backend/internal/persistence"
 )
 
 func main() {
@@ -38,30 +40,30 @@ func main() {
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	if err = app.Migrate(ctx, pool); err != nil {
+	if err = persistence.Migrate(ctx, pool); err != nil {
 		logger.Error("database migration failed", "error", err)
 		os.Exit(1)
 	}
-	cfg := app.Config{
+	cfg := httpapi.Config{
 		Env: env("APP_ENV", "production"), JWTSecret: os.Getenv("JWT_SECRET"),
 		AccessTTL:      duration("ACCESS_TOKEN_TTL", 15*time.Minute),
 		RefreshTTL:     duration("REFRESH_TOKEN_TTL", 30*24*time.Hour),
-		BodyLimit:      int64(app.ParseIntEnv("BODY_LIMIT_BYTES", 1<<20)),
+		BodyLimit:      int64(httpapi.ParseIntEnv("BODY_LIMIT_BYTES", 1<<20)),
 		DemoMode:       os.Getenv("DEMO_MODE") == "true",
 		TrustedProxies: list(os.Getenv("TRUSTED_PROXIES")),
-		AuthRateLimit:  app.ParseIntEnv("AUTH_RATE_LIMIT_PER_MINUTE", 30),
+		AuthRateLimit:  httpapi.ParseIntEnv("AUTH_RATE_LIMIT_PER_MINUTE", 30),
 	}
 	if len(cfg.JWTSecret) < 32 {
 		logger.Error("JWT_SECRET must be set to at least 32 characters")
 		os.Exit(1)
 	}
 	if cfg.DemoMode && cfg.Env == "local" {
-		if err = app.SeedDemo(ctx, pool, logger); err != nil {
+		if err = demo.Seed(ctx, pool, logger); err != nil {
 			logger.Error("local demo seed failed", "error", err)
 			os.Exit(1)
 		}
 	}
-	srv := app.New(pool, cfg, logger).HTTPServer(env("HTTP_ADDR", ":8080"))
+	srv := httpapi.New(pool, cfg, logger).HTTPServer(env("HTTP_ADDR", ":8080"))
 
 	// Stop accepting connections on SIGINT/SIGTERM and let in-flight requests finish.
 	stop, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -1,4 +1,6 @@
-package app
+// Package demo seeds the local demo project. It runs only when APP_ENV=local and
+// DEMO_MODE=true; every value here is public demo data, never a production secret.
+package demo
 
 import (
 	"context"
@@ -9,6 +11,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
+	"realmstack-backend/internal/catalog"
+	"realmstack-backend/internal/goals"
+	"realmstack-backend/internal/platform"
 )
 
 const (
@@ -20,7 +25,9 @@ const (
 	DemoServerCredential  = "rs_demo.realmstack-local-server-secret"
 )
 
-func SeedDemo(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error {
+// Seed creates or refreshes the demo accounts, project and published catalog. It is
+// idempotent: it never overwrites the draft and grants starter items/currency once.
+func Seed(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error {
 	adminHash, err := bcrypt.GenerateFromPassword([]byte(DemoAdminPassword), bcrypt.DefaultCost)
 	if err != nil {
 		return err
@@ -58,8 +65,8 @@ func SeedDemo(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error 
 		return err
 	}
 	if versions == 0 {
-		cfg := demoRuntimeConfiguration()
-		if errs := validateConfig(cfg); len(errs) > 0 {
+		cfg := Configuration()
+		if errs := catalog.ValidateConfig(cfg); len(errs) > 0 {
 			return fmt.Errorf("demo configuration is invalid: %v", errs)
 		}
 		var versionID string
@@ -67,14 +74,14 @@ func SeedDemo(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error 
 		if err != nil {
 			return err
 		}
-		if _, _, err = applyRuntimeConfig(ctx, tx, projectID, envID, versionID, cfg); err != nil {
+		if _, _, err = catalog.ApplyRuntimeConfig(ctx, tx, projectID, envID, versionID, cfg); err != nil {
 			return err
 		}
 	}
 	var credentialID string
 	err = tx.QueryRow(ctx, `SELECT id::text FROM server_credentials WHERE key_prefix='rs_demo' AND project_id=$1 AND environment_id=$2`, projectID, envID).Scan(&credentialID)
 	if err != nil {
-		_, err = tx.Exec(ctx, `INSERT INTO server_credentials(project_id,environment_id,key_prefix,secret_hash) VALUES($1,$2,'rs_demo',$3)`, projectID, envID, digest(strings.SplitN(DemoServerCredential, ".", 2)[1]))
+		_, err = tx.Exec(ctx, `INSERT INTO server_credentials(project_id,environment_id,key_prefix,secret_hash) VALUES($1,$2,'rs_demo',$3)`, projectID, envID, platform.Digest(strings.SplitN(DemoServerCredential, ".", 2)[1]))
 		if err != nil {
 			return err
 		}
@@ -114,17 +121,37 @@ func SeedDemo(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error 
 }
 
 func demoConfiguration() []byte {
-	b, _ := json.Marshal(demoRuntimeConfiguration())
+	b, _ := json.Marshal(Configuration())
 	return b
 }
-func demoRuntimeConfiguration() runtimeConfig {
-	return runtimeConfig{
-		Items: []itemConfig{
+
+// Configuration is the demo catalog, also used by tests as a known-valid config.
+func Configuration() catalog.Config {
+	return catalog.Config{
+		Items: []catalog.ItemConfig{
 			{Key: "health_potion", Name: "Health Potion", Category: "consumable", Stackable: true, MaxStack: 99, Metadata: map[string]any{"healing": 50}},
 			{Key: "iron_sword", Name: "Iron Sword", Category: "weapon", Stackable: false, MaxStack: 1, Metadata: map[string]any{"slot": "weapon", "attack": 12}},
 		},
-		Currencies:   []currencyConfig{{Key: "credits", Name: "Credits"}, {Key: "gems", Name: "Gems"}},
+		Currencies:   []catalog.CurrencyConfig{{Key: "credits", Name: "Credits"}, {Key: "gems", Name: "Gems"}},
 		Progression:  []int64{100, 300, 700, 1500},
-		Leaderboards: []leaderboardConfig{{Key: "global", Direction: "higher"}},
+		Leaderboards: []catalog.LeaderboardConfig{{Key: "global", Direction: "higher"}},
+		Stats: []catalog.StatConfig{
+			{Key: "enemies_defeated", Name: "Enemies defeated", Kind: "counter"},
+			{Key: "met_the_mentor", Name: "Met the mentor", Kind: "flag"},
+		},
+		Achievements: []catalog.AchievementConfig{
+			{Key: "first_blood", Name: "First Blood", Description: "Defeat your first enemy.",
+				Conditions: []goals.Condition{{Type: goals.Stat, StatKey: "enemies_defeated", Target: 1}},
+				Rewards:    goals.Rewards{Currencies: []goals.CurrencyReward{{CurrencyKey: "credits", Amount: 100}}}},
+			{Key: "veteran", Name: "Veteran", Description: "Reach level 3 and defeat 25 enemies.",
+				Conditions: []goals.Condition{{Type: goals.LevelReached, Target: 3}, {Type: goals.Stat, StatKey: "enemies_defeated", Target: 25}},
+				Rewards:    goals.Rewards{Currencies: []goals.CurrencyReward{{CurrencyKey: "gems", Amount: 5}}, XP: 100}},
+			{Key: "high_roller", Name: "High Roller", Description: "Score at least 10,000 on the global leaderboard.", ClaimableBy: "server",
+				Conditions: []goals.Condition{{Type: goals.LeaderboardScore, LeaderboardKey: "global", Target: 10000}},
+				Rewards:    goals.Rewards{Items: []goals.ItemReward{{ItemKey: "health_potion", Quantity: 3}}}},
+			{Key: "a_wise_word", Name: "A Wise Word", Description: "Listen to the mentor.", Hidden: true,
+				Conditions: []goals.Condition{{Type: goals.Flag, FlagKey: "met_the_mentor"}},
+				Rewards:    goals.Rewards{XP: 50}},
+		},
 	}
 }
