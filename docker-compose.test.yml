@@ -1,0 +1,38 @@
+# Runs vet, unit tests and PostgreSQL integration tests in containers.
+#   docker compose -f docker-compose.test.yml run --rm test
+# The database lives in tmpfs and disappears when the containers stop.
+services:
+  test-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: realmstack_test
+      POSTGRES_PASSWORD: realmstack_test
+      POSTGRES_DB: realmstack_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U realmstack_test -d realmstack_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  test:
+    image: golang:1.22-alpine
+    working_dir: /src
+    volumes:
+      - .:/src
+      - go-mod-cache:/go/pkg/mod
+    environment:
+      CGO_ENABLED: "0"
+      TEST_DATABASE_URL: postgres://realmstack_test:realmstack_test@test-db:5432/realmstack_test?sslmode=disable
+    command: >
+      sh -c "if [ -n \"$$(gofmt -l .)\" ]; then echo 'gofmt needed:'; gofmt -l .; exit 1; fi;
+             go vet ./... &&
+             go test -count=1 -coverprofile=/tmp/coverage.out ./... &&
+             go tool cover -func=/tmp/coverage.out | tail -1"
+    depends_on:
+      test-db:
+        condition: service_healthy
+
+volumes:
+  go-mod-cache:

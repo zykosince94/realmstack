@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: realmstack_test
+          POSTGRES_PASSWORD: realmstack_test
+          POSTGRES_DB: realmstack_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U realmstack_test -d realmstack_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      TEST_DATABASE_URL: postgres://realmstack_test:realmstack_test@localhost:5432/realmstack_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi
+      - name: go vet
+        run: go vet ./...
+      - name: Unit and PostgreSQL integration tests
+        run: go test -count=1 -race ./...
+      - name: Build image
+        run: docker build -t realmstack-backend:ci .

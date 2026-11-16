@@ -18,10 +18,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -33,13 +35,23 @@ type Config struct {
 	RefreshTTL time.Duration
 	BodyLimit  int64
 	DemoMode   bool
+	// TrustedProxies lists proxy IPs/CIDRs whose X-Forwarded-For header is honoured
+	// when resolving the client IP. Empty means the TCP peer address is always used.
+	TrustedProxies []string
+	// AuthRateLimit is the number of authentication attempts allowed per client IP,
+	// per route, per minute. Zero uses the default of 30.
+	AuthRateLimit int
 }
 
 type Server struct {
-	db     *pgxpool.Pool
-	cfg    Config
-	log    *slog.Logger
-	router *gin.Engine
+	db      *pgxpool.Pool
+	cfg     Config
+	log     *slog.Logger
+	router  *gin.Engine
+	limiter *rateLimiter
+	// now is the single clock for token expiry, refresh expiry and score timestamps.
+	// Tests replace it to exercise boundaries.
+	now func() time.Time
 }
 
 type principal struct {
@@ -53,9 +65,18 @@ func New(db *pgxpool.Pool, cfg Config, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if cfg.AuthRateLimit <= 0 {
+		cfg.AuthRateLimit = 30
+	}
 	gin.SetMode(gin.ReleaseMode)
-	s := &Server{db: db, cfg: cfg, log: logger, router: gin.New()}
-	s.router.Use(s.recovery(), s.requestContext(), s.limitBody())
+	s := &Server{db: db, cfg: cfg, log: logger, router: gin.New(), limiter: newRateLimiter(cfg.AuthRateLimit, time.Minute), now: time.Now}
+	// Gin trusts every proxy by default, which would let any client spoof X-Forwarded-For.
+	// Only the configured proxies are trusted; with none, ClientIP is the TCP peer.
+	if err := s.router.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		logger.Error("invalid trusted proxy configuration; trusting no proxies", "error", err)
+		_ = s.router.SetTrustedProxies(nil)
+	}
+	s.router.Use(s.recovery(), s.requestContext(), s.limitBody(), validateIDParams())
 	s.routes()
 	s.router.NoRoute(func(c *gin.Context) {
 		failure(c, http.StatusNotFound, "NOT_FOUND", "The requested route was not found.")
@@ -66,7 +87,22 @@ func New(db *pgxpool.Pool, cfg Config, logger *slog.Logger) *Server {
 	return s
 }
 
-func (s *Server) Run(addr string) error { return s.router.Run(addr) }
+// Handler exposes the HTTP handler, mainly for tests.
+func (s *Server) Handler() http.Handler { return s.router }
+
+// HTTPServer returns an http.Server with timeouts that protect against slow clients.
+// The caller owns ListenAndServe and Shutdown.
+func (s *Server) HTTPServer(addr string) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           s.router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+}
 
 func ParseIntEnv(key string, fallback int) int {
 	v, err := strconv.Atoi(os.Getenv(key))
@@ -76,11 +112,30 @@ func ParseIntEnv(key string, fallback int) int {
 	return v
 }
 
+// Migrate applies migrations from ./migrations (relative to the working directory).
 func Migrate(ctx context.Context, db *pgxpool.Pool) error {
+	return MigrateDir(ctx, db, "migrations")
+}
+
+// migrationLockID is the PostgreSQL advisory lock key held while migrating.
+const migrationLockID = 72_656_176_000_001
+
+// MigrateDir applies every *.sql file in dir, in lexical order, exactly once. A
+// session advisory lock serializes API instances that start at the same time.
+func MigrateDir(ctx context.Context, pool *pgxpool.Pool, dir string) error {
+	db, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration connection: %w", err)
+	}
+	defer db.Release()
+	if _, err = db.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLockID); err != nil {
+		return fmt.Errorf("take migration lock: %w", err)
+	}
+	defer func() { _, _ = db.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationLockID) }()
 	if _, err := db.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations(version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
 		return fmt.Errorf("create migration ledger: %w", err)
 	}
-	files, err := filepath.Glob(filepath.Join("migrations", "*.sql"))
+	files, err := filepath.Glob(filepath.Join(dir, "*.sql"))
 	if err != nil {
 		return fmt.Errorf("list migrations: %w", err)
 	}
@@ -154,13 +209,12 @@ func (s *Server) routes() {
 	r := s.router
 	r.GET("/healthz", func(c *gin.Context) { success(c, http.StatusOK, gin.H{"status": "ok"}) })
 	v := r.Group("/v1")
-	v.POST("/auth/register", s.registerUser)
-	v.POST("/auth/login", s.loginUser)
+	v.POST("/auth/register", s.rateLimit(), s.registerUser)
+	v.POST("/auth/login", s.rateLimit(), s.loginUser)
 	v.GET("/projects", s.userAuth(), s.listProjects)
 	v.POST("/projects", s.userAuth(), s.createProject)
 	v.GET("/projects/:projectId", s.userAuth(), s.getProject)
 	v.PATCH("/projects/:projectId", s.userAuth(), s.updateProject)
-	v.DELETE("/projects/:projectId", s.userAuth(), s.deleteProject)
 	v.GET("/projects/:projectId/environments", s.userAuth(), s.listEnvironments)
 	v.POST("/projects/:projectId/environments", s.userAuth(), s.createEnvironment)
 	v.GET("/projects/:projectId/environments/:envId/credentials", s.userAuth(), s.listCredentials)
@@ -170,6 +224,19 @@ func (s *Server) routes() {
 	v.PUT("/projects/:projectId/environments/:envId/configurations/draft", s.userAuth(), s.putDraft)
 	v.POST("/projects/:projectId/environments/:envId/configurations/publish", s.userAuth(), s.publishConfig)
 	v.GET("/projects/:projectId/environments/:envId/configurations/versions", s.userAuth(), s.listConfigVersions)
+	v.GET("/projects/:projectId/environments/:envId/configurations/published", s.userAuth(), s.getPublishedConfig)
+	v.POST("/projects/:projectId/environments/:envId/configurations/validate", s.userAuth(), s.validateDraft)
+	for _, name := range draftCollections {
+		kind := definitionKinds[name]
+		base := "/projects/:projectId/environments/:envId/" + name
+		v.GET(base, s.userAuth(), s.listDefinitions(kind))
+		v.POST(base, s.userAuth(), s.createDefinition(kind))
+		v.GET(base+"/:key", s.userAuth(), s.getDefinition(kind))
+		v.PUT(base+"/:key", s.userAuth(), s.replaceDefinition(kind))
+		v.DELETE(base+"/:key", s.userAuth(), s.deleteDefinition(kind))
+	}
+	v.GET("/projects/:projectId/environments/:envId/progression", s.userAuth(), s.getDraftProgression)
+	v.PUT("/projects/:projectId/environments/:envId/progression", s.userAuth(), s.putDraftProgression)
 	v.POST("/players/register", s.rateLimit(), s.registerPlayer)
 	v.POST("/players/login", s.rateLimit(), s.loginPlayer)
 	v.POST("/players/refresh", s.refreshPlayer)
@@ -192,10 +259,46 @@ func (s *Server) routes() {
 }
 
 func success(c *gin.Context, status int, data any) {
-	c.JSON(status, gin.H{"data": data, "meta": gin.H{"request_id": c.GetString("request_id")}})
+	successMeta(c, status, data, nil)
+}
+
+// successMeta adds extra fields (such as a pagination cursor) to the response meta.
+func successMeta(c *gin.Context, status int, data any, extra gin.H) {
+	meta := gin.H{"request_id": c.GetString("request_id")}
+	for k, v := range extra {
+		meta[k] = v
+	}
+	c.JSON(status, gin.H{"data": data, "meta": meta})
 }
 func failure(c *gin.Context, status int, code, message string) {
-	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"code": code, "message": message}, "meta": gin.H{"request_id": c.GetString("request_id")}})
+	failureDetails(c, status, code, message, nil)
+}
+
+// failureDetails sends the standard error envelope; details defaults to {}.
+func failureDetails(c *gin.Context, status int, code, message string, details any) {
+	if details == nil {
+		details = gin.H{}
+	}
+	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"code": code, "message": message, "details": details}, "meta": gin.H{"request_id": c.GetString("request_id")}})
+}
+
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// validateIDParams answers 404 for any malformed UUID route parameter, so a bad ID
+// never reaches a query (where the uuid cast would fail as a 500).
+func validateIDParams() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		for _, p := range c.Params {
+			switch p.Key {
+			case "projectId", "envId", "id", "playerId":
+				if !uuidPattern.MatchString(p.Value) {
+					notFound(c)
+					return
+				}
+			}
+		}
+		c.Next()
+	}
 }
 func badRequest(c *gin.Context) {
 	failure(c, 400, "INVALID_REQUEST", "The request body or fields are invalid.")
@@ -249,7 +352,7 @@ func (s *Server) readJWT(header, kind string) (principal, bool) {
 		return p, false
 	}
 	exp, ok := claims["exp"].(float64)
-	if !ok || time.Now().Unix() >= int64(exp) {
+	if !ok || s.now().Unix() >= int64(exp) {
 		return p, false
 	}
 	p.ID, _ = claims["sub"].(string)
@@ -260,7 +363,7 @@ func (s *Server) readJWT(header, kind string) (principal, bool) {
 }
 func (s *Server) token(p principal, ttl time.Duration) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
-	payload, _ := json.Marshal(gin.H{"sub": p.ID, "kind": p.Kind, "project_id": p.ProjectID, "environment_id": p.EnvironmentID, "exp": time.Now().Add(ttl).Unix()})
+	payload, _ := json.Marshal(gin.H{"sub": p.ID, "kind": p.Kind, "project_id": p.ProjectID, "environment_id": p.EnvironmentID, "exp": s.now().Add(ttl).Unix()})
 	body := header + "." + base64.RawURLEncoding.EncodeToString(payload)
 	return body + "." + hmacText(s.cfg.JWTSecret, body)
 }
@@ -283,7 +386,7 @@ func (s *Server) serverAuth() gin.HandlerFunc {
 		}
 		var p principal
 		var hash string
-		err := s.db.QueryRow(c, `SELECT project_id::text,environment_id::text,secret_hash FROM server_credentials WHERE key_prefix=$1 AND revoked_at IS NULL`, parts[0]).Scan(&p.ProjectID, &p.EnvironmentID, &hash)
+		err := s.db.QueryRow(c, `SELECT sc.project_id::text,sc.environment_id::text,sc.secret_hash FROM server_credentials sc JOIN projects pr ON pr.id=sc.project_id WHERE sc.key_prefix=$1 AND sc.revoked_at IS NULL AND pr.status='active'`, parts[0]).Scan(&p.ProjectID, &p.EnvironmentID, &hash)
 		if err != nil || !secureHash(hash, parts[1]) {
 			failure(c, 401, "UNAUTHORIZED", "The server credential is invalid.")
 			return
@@ -302,25 +405,34 @@ func (s *Server) publicScope() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		if p, ok := c.Get("principal"); ok {
-			c.Set("scope", p.(principal))
-			c.Next()
-			return
-		}
 		public := c.GetHeader("X-Public-Environment")
 		if public == "" {
 			public = c.Query("environment_id")
 		}
-		var p principal
-		err := s.db.QueryRow(c, `SELECT project_id::text,id::text FROM environments WHERE public_id=$1`, public).Scan(&p.ProjectID, &p.EnvironmentID)
-		if err != nil {
-			failure(c, 404, "NOT_FOUND", "The public environment was not found.")
+		p, ok := s.lookupPublic(c, public)
+		if !ok {
 			return
 		}
 		p.Kind = "public"
 		c.Set("scope", p)
 		c.Next()
 	}
+}
+
+// lookupPublic resolves a public environment identifier of an active project. It
+// accepts only the public identifier, never the internal environment UUID.
+func (s *Server) lookupPublic(c *gin.Context, public string) (principal, bool) {
+	var p principal
+	err := s.db.QueryRow(c, `SELECT e.project_id::text,e.id::text FROM environments e JOIN projects pr ON pr.id=e.project_id WHERE e.public_id=$1 AND pr.status='active'`, public).Scan(&p.ProjectID, &p.EnvironmentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		failure(c, 404, "NOT_FOUND", "The public project environment was not found.")
+		return p, false
+	}
+	if err != nil {
+		internal(c, err)
+		return p, false
+	}
+	return p, true
 }
 func getPrincipal(c *gin.Context) principal { p, _ := c.Get("principal"); return p.(principal) }
 func randomID() string {
@@ -342,7 +454,35 @@ func secureHash(stored, raw string) bool {
 	return subtle.ConstantTimeCompare([]byte(stored), []byte(digest(raw))) == 1
 }
 func normalizeEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
-func validSlug(s string) bool            { return regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,48}$`).MatchString(s) }
+
+var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,48}$`)
+
+func validSlug(s string) bool { return slugPattern.MatchString(s) }
+
+// isUniqueViolation reports whether err is a PostgreSQL unique-constraint violation.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+var (
+	dummyHashOnce sync.Once
+	dummyHash     []byte
+)
+
+// checkPassword compares a password against a stored bcrypt hash. When the account
+// does not exist (found == false) it still runs a bcrypt comparison against a dummy
+// hash, so response timing does not reveal whether an email is registered.
+func checkPassword(found bool, hash, password string) bool {
+	if !found {
+		dummyHashOnce.Do(func() {
+			dummyHash, _ = bcrypt.GenerateFromPassword([]byte("realmstack-timing-equaliser"), bcrypt.DefaultCost)
+		})
+		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
+		return false
+	}
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+}
 func ownerProject(c *gin.Context, db *pgxpool.Pool, projectID string) bool {
 	p := getPrincipal(c)
 	var exists bool
@@ -385,7 +525,7 @@ func (s *Server) registerUser(c *gin.Context) {
 	var id string
 	err = s.db.QueryRow(c, `INSERT INTO users(email,password_hash) VALUES($1,$2) RETURNING id::text`, in.Email, string(hash)).Scan(&id)
 	if err != nil {
-		if strings.Contains(err.Error(), "unique") {
+		if isUniqueViolation(err) {
 			failure(c, 409, "CONFLICT", "An account with that email already exists.")
 			return
 		}
@@ -404,16 +544,31 @@ func (s *Server) loginUser(c *gin.Context) {
 	}
 	var id, hash string
 	err := s.db.QueryRow(c, `SELECT id::text,password_hash FROM users WHERE email=$1`, normalizeEmail(in.Email)).Scan(&id, &hash)
-	if err != nil || bcrypt.CompareHashAndPassword([]byte(hash), []byte(in.Password)) != nil {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		internal(c, err)
+		return
+	}
+	if !checkPassword(err == nil, hash, in.Password) {
 		failure(c, 401, "INVALID_CREDENTIALS", "Email or password is incorrect.")
 		return
 	}
 	success(c, 200, gin.H{"user": gin.H{"id": id, "email": normalizeEmail(in.Email)}, "access_token": s.token(principal{ID: id, Kind: "user"}, s.cfg.AccessTTL), "token_type": "Bearer"})
 }
 
+// projectView is the API shape of a project row.
+func projectView(id, name, slug, status string, created time.Time, archived *time.Time) gin.H {
+	out := gin.H{"id": id, "name": name, "slug": slug, "status": status, "created_at": created}
+	if archived != nil {
+		out["archived_at"] = archived
+	}
+	return out
+}
+
+// listProjects lists the caller's active projects; ?include_archived=true adds archived ones.
 func (s *Server) listProjects(c *gin.Context) {
 	p := getPrincipal(c)
-	rows, err := s.db.Query(c, `SELECT id::text,name,slug,created_at FROM projects WHERE owner_user_id=$1 ORDER BY created_at`, p.ID)
+	includeArchived := c.Query("include_archived") == "true"
+	rows, err := s.db.Query(c, `SELECT id::text,name,slug,status,created_at,archived_at FROM projects WHERE owner_user_id=$1 AND ($2 OR status='active') ORDER BY created_at`, p.ID, includeArchived)
 	if err != nil {
 		internal(c, err)
 		return
@@ -421,11 +576,18 @@ func (s *Server) listProjects(c *gin.Context) {
 	defer rows.Close()
 	out := []gin.H{}
 	for rows.Next() {
-		var id, name, slug string
+		var id, name, slug, status string
 		var created time.Time
-		if rows.Scan(&id, &name, &slug, &created) == nil {
-			out = append(out, gin.H{"id": id, "name": name, "slug": slug, "created_at": created})
+		var archived *time.Time
+		if err = rows.Scan(&id, &name, &slug, &status, &created, &archived); err != nil {
+			internal(c, err)
+			return
 		}
+		out = append(out, projectView(id, name, slug, status, created, archived))
+	}
+	if err = rows.Err(); err != nil {
+		internal(c, err)
+		return
 	}
 	success(c, 200, out)
 }
@@ -452,7 +614,11 @@ func (s *Server) createProject(c *gin.Context) {
 	defer tx.Rollback(c)
 	var id, envID, public string
 	if err = tx.QueryRow(c, `INSERT INTO projects(owner_user_id,name,slug) VALUES($1,$2,$3) RETURNING id::text`, p.ID, in.Name, in.Slug).Scan(&id); err != nil {
-		failure(c, 409, "CONFLICT", "Project slug is already in use.")
+		if isUniqueViolation(err) {
+			failure(c, 409, "CONFLICT", "Project slug is already in use.")
+			return
+		}
+		internal(c, err)
 		return
 	}
 	public = "pub_" + randomSecret(18)
@@ -469,22 +635,34 @@ func (s *Server) createProject(c *gin.Context) {
 		internal(c, err)
 		return
 	}
-	success(c, 201, gin.H{"id": id, "name": in.Name, "slug": in.Slug, "environments": []gin.H{{"id": envID, "name": "development", "public_id": public}}})
+	success(c, 201, gin.H{"id": id, "name": in.Name, "slug": in.Slug, "status": "active", "environments": []gin.H{{"id": envID, "name": "development", "public_id": public}}})
 }
 func (s *Server) getProject(c *gin.Context) {
 	p := getPrincipal(c)
-	var id, name, slug string
-	err := s.db.QueryRow(c, `SELECT id::text,name,slug FROM projects WHERE id=$1 AND owner_user_id=$2`, c.Param("projectId"), p.ID).Scan(&id, &name, &slug)
-	if err != nil {
+	var id, name, slug, status string
+	var created time.Time
+	var archived *time.Time
+	err := s.db.QueryRow(c, `SELECT id::text,name,slug,status,created_at,archived_at FROM projects WHERE id=$1 AND owner_user_id=$2`, c.Param("projectId"), p.ID).Scan(&id, &name, &slug, &status, &created, &archived)
+	if errors.Is(err, pgx.ErrNoRows) {
 		notFound(c)
 		return
 	}
-	success(c, 200, gin.H{"id": id, "name": name, "slug": slug})
+	if err != nil {
+		internal(c, err)
+		return
+	}
+	success(c, 200, projectView(id, name, slug, status, created, archived))
 }
+
+// updateProject renames a project, changes its slug, or archives/restores it with
+// {"status":"archived"|"active"}. Projects are never deleted: archiving keeps every
+// ledger and stops the runtime APIs (server credentials, player registration, login
+// and refresh) for that project. Already-issued player access tokens expire normally.
 func (s *Server) updateProject(c *gin.Context) {
 	var in struct {
-		Name *string `json:"name"`
-		Slug *string `json:"slug"`
+		Name   *string `json:"name"`
+		Slug   *string `json:"slug"`
+		Status *string `json:"status"`
 	}
 	if !bind(c, &in) {
 		return
@@ -494,7 +672,7 @@ func (s *Server) updateProject(c *gin.Context) {
 		notFound(c)
 		return
 	}
-	name, slug := "", ""
+	name, slug, status := "", "", ""
 	if in.Name != nil {
 		name = strings.TrimSpace(*in.Name)
 		if name == "" || len(name) > 100 {
@@ -509,25 +687,26 @@ func (s *Server) updateProject(c *gin.Context) {
 			return
 		}
 	}
-	_, err := s.db.Exec(c, `UPDATE projects SET name=COALESCE(NULLIF($1,''),name),slug=COALESCE(NULLIF($2,''),slug) WHERE id=$3 AND owner_user_id=$4`, name, slug, c.Param("projectId"), p.ID)
-	if err != nil {
-		failure(c, 409, "CONFLICT", "Project slug is already in use.")
-		return
+	if in.Status != nil {
+		status = *in.Status
+		if status != "active" && status != "archived" {
+			failure(c, 422, "VALIDATION_ERROR", "Status must be active or archived.")
+			return
+		}
 	}
-	s.getProject(c)
-}
-func (s *Server) deleteProject(c *gin.Context) {
-	p := getPrincipal(c)
-	tag, err := s.db.Exec(c, `DELETE FROM projects WHERE id=$1 AND owner_user_id=$2`, c.Param("projectId"), p.ID)
+	_, err := s.db.Exec(c, `UPDATE projects SET name=COALESCE(NULLIF($1,''),name),slug=COALESCE(NULLIF($2,''),slug),
+		archived_at=CASE WHEN $3='archived' AND status<>'archived' THEN now() WHEN $3='active' THEN NULL ELSE archived_at END,
+		status=COALESCE(NULLIF($3,''),status)
+		WHERE id=$4 AND owner_user_id=$5`, name, slug, status, c.Param("projectId"), p.ID)
 	if err != nil {
+		if isUniqueViolation(err) {
+			failure(c, 409, "CONFLICT", "Project slug is already in use.")
+			return
+		}
 		internal(c, err)
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		notFound(c)
-		return
-	}
-	success(c, 200, gin.H{"deleted": true})
+	s.getProject(c)
 }
 func (s *Server) listEnvironments(c *gin.Context) {
 	if !ownerProject(c, s.db, c.Param("projectId")) {
@@ -544,9 +723,15 @@ func (s *Server) listEnvironments(c *gin.Context) {
 	for rows.Next() {
 		var id, n, pub string
 		var at time.Time
-		if rows.Scan(&id, &n, &pub, &at) == nil {
-			out = append(out, gin.H{"id": id, "name": n, "public_id": pub, "created_at": at})
+		if err = rows.Scan(&id, &n, &pub, &at); err != nil {
+			internal(c, err)
+			return
 		}
+		out = append(out, gin.H{"id": id, "name": n, "public_id": pub, "created_at": at})
+	}
+	if err = rows.Err(); err != nil {
+		internal(c, err)
+		return
 	}
 	success(c, 200, out)
 }
@@ -561,25 +746,36 @@ func (s *Server) createEnvironment(c *gin.Context) {
 		failure(c, 422, "VALIDATION_ERROR", "Environment must be development or production.")
 		return
 	}
-	p := getPrincipal(c)
 	projectID := c.Param("projectId")
 	if !ownerProject(c, s.db, projectID) {
 		notFound(c)
 		return
 	}
 	pub := "pub_" + randomSecret(18)
-	var id string
-	err := s.db.QueryRow(c, `INSERT INTO environments(project_id,name,public_id) VALUES($1,$2,$3) RETURNING id::text`, projectID, in.Name, pub).Scan(&id)
-	if err != nil {
-		failure(c, 409, "CONFLICT", "That environment already exists.")
-		return
-	}
-	_, err = s.db.Exec(c, `INSERT INTO configuration_drafts(project_id,environment_id) VALUES($1,$2)`, projectID, id)
+	tx, err := s.db.Begin(c)
 	if err != nil {
 		internal(c, err)
 		return
 	}
-	_ = p
+	defer tx.Rollback(c)
+	var id string
+	err = tx.QueryRow(c, `INSERT INTO environments(project_id,name,public_id) VALUES($1,$2,$3) RETURNING id::text`, projectID, in.Name, pub).Scan(&id)
+	if err != nil {
+		if isUniqueViolation(err) {
+			failure(c, 409, "CONFLICT", "That environment already exists.")
+			return
+		}
+		internal(c, err)
+		return
+	}
+	if _, err = tx.Exec(c, `INSERT INTO configuration_drafts(project_id,environment_id) VALUES($1,$2)`, projectID, id); err != nil {
+		internal(c, err)
+		return
+	}
+	if err = tx.Commit(c); err != nil {
+		internal(c, err)
+		return
+	}
 	success(c, 201, gin.H{"id": id, "project_id": projectID, "name": in.Name, "public_id": pub})
 }
 func (s *Server) issueCredential(c *gin.Context) {
@@ -643,211 +839,4 @@ func (s *Server) revokeCredential(c *gin.Context) {
 	success(c, 200, gin.H{"revoked": true})
 }
 
-func (s *Server) getDraft(c *gin.Context) {
-	projectID, envID, ok := s.ownedEnvironment(c)
-	if !ok {
-		return
-	}
-	var config json.RawMessage
-	if err := s.db.QueryRow(c, `SELECT config FROM configuration_drafts WHERE project_id=$1 AND environment_id=$2`, projectID, envID).Scan(&config); err != nil {
-		internal(c, err)
-		return
-	}
-	success(c, 200, json.RawMessage(config))
-}
-func (s *Server) putDraft(c *gin.Context) {
-	projectID, envID, ok := s.ownedEnvironment(c)
-	if !ok {
-		return
-	}
-	var raw json.RawMessage
-	if err := c.ShouldBindJSON(&raw); err != nil || len(raw) == 0 {
-		badRequest(c)
-		return
-	}
-	var config map[string]json.RawMessage
-	if json.Unmarshal(raw, &config) != nil {
-		badRequest(c)
-		return
-	}
-	for _, key := range []string{"items", "currencies", "progression", "leaderboards"} {
-		if _, ok := config[key]; !ok {
-			config[key] = json.RawMessage("[]")
-		}
-	}
-	b, err := json.Marshal(config)
-	if err != nil {
-		badRequest(c)
-		return
-	}
-	_, err = s.db.Exec(c, `INSERT INTO configuration_drafts(project_id,environment_id,config,updated_at) VALUES($1,$2,$3,now()) ON CONFLICT(project_id,environment_id) DO UPDATE SET config=EXCLUDED.config,updated_at=now()`, projectID, envID, b)
-	if err != nil {
-		internal(c, err)
-		return
-	}
-	success(c, 200, json.RawMessage(b))
-}
-func (s *Server) publishConfig(c *gin.Context) {
-	projectID, envID, ok := s.ownedEnvironment(c)
-	if !ok {
-		return
-	}
-	tx, err := s.db.Begin(c)
-	if err != nil {
-		internal(c, err)
-		return
-	}
-	defer tx.Rollback(c)
-	var raw []byte
-	err = tx.QueryRow(c, `SELECT config FROM configuration_drafts WHERE project_id=$1 AND environment_id=$2 FOR UPDATE`, projectID, envID).Scan(&raw)
-	if err != nil {
-		notFound(c)
-		return
-	}
-	var cfg runtimeConfig
-	if json.Unmarshal(raw, &cfg) != nil || validateConfig(cfg) != nil {
-		failure(c, 422, "INVALID_CONFIGURATION", "Draft configuration is invalid.")
-		return
-	}
-	var version int
-	err = tx.QueryRow(c, `SELECT COALESCE(MAX(version),0)+1 FROM configuration_versions WHERE project_id=$1 AND environment_id=$2`, projectID, envID).Scan(&version)
-	if err != nil {
-		internal(c, err)
-		return
-	}
-	_, err = tx.Exec(c, `INSERT INTO configuration_versions(project_id,environment_id,version,config) VALUES($1,$2,$3,$4)`, projectID, envID, version, raw)
-	if err != nil {
-		internal(c, err)
-		return
-	}
-	if err = s.applyRuntimeConfig(c, tx, projectID, envID, version, cfg); err != nil {
-		internal(c, err)
-		return
-	}
-	if err = tx.Commit(c); err != nil {
-		internal(c, err)
-		return
-	}
-	success(c, 201, gin.H{"version": version, "published_at": time.Now().UTC()})
-}
-func (s *Server) listConfigVersions(c *gin.Context) {
-	projectID, envID, ok := s.ownedEnvironment(c)
-	if !ok {
-		return
-	}
-	rows, err := s.db.Query(c, `SELECT id::text,version,config,created_at FROM configuration_versions WHERE project_id=$1 AND environment_id=$2 ORDER BY version DESC`, projectID, envID)
-	if err != nil {
-		internal(c, err)
-		return
-	}
-	defer rows.Close()
-	out := []gin.H{}
-	for rows.Next() {
-		var id string
-		var version int
-		var raw []byte
-		var at time.Time
-		if rows.Scan(&id, &version, &raw, &at) == nil {
-			out = append(out, gin.H{"id": id, "version": version, "config": json.RawMessage(raw), "published_at": at})
-		}
-	}
-	success(c, 200, out)
-}
-
-type itemConfig struct {
-	Key       string         `json:"key"`
-	Name      string         `json:"name"`
-	Category  string         `json:"category"`
-	Stackable bool           `json:"stackable"`
-	MaxStack  int            `json:"max_stack"`
-	Metadata  map[string]any `json:"metadata"`
-}
-type currencyConfig struct {
-	Key  string `json:"key"`
-	Name string `json:"name"`
-}
-type leaderboardConfig struct {
-	Key         string     `json:"key"`
-	Direction   string     `json:"direction"`
-	SeasonStart *time.Time `json:"season_start"`
-	SeasonEnd   *time.Time `json:"season_end"`
-}
-type runtimeConfig struct {
-	Items        []itemConfig        `json:"items"`
-	Currencies   []currencyConfig    `json:"currencies"`
-	Progression  []int64             `json:"progression"`
-	Leaderboards []leaderboardConfig `json:"leaderboards"`
-}
-
-var keyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 var requestIDPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
-
-func validateConfig(cfg runtimeConfig) error {
-	if len(cfg.Items) > 500 || len(cfg.Currencies) > 100 || len(cfg.Progression) == 0 || len(cfg.Progression) > 1000 {
-		return errors.New("configuration limits")
-	}
-	seen := map[string]bool{}
-	for _, x := range cfg.Items {
-		if !keyPattern.MatchString(x.Key) || strings.TrimSpace(x.Name) == "" || len(x.Name) > 100 || len(x.Category) > 64 || seen["i"+x.Key] || x.MaxStack < 1 || x.MaxStack > 100000 || (!x.Stackable && x.MaxStack != 1) {
-			return errors.New("invalid item")
-		}
-		seen["i"+x.Key] = true
-	}
-	for _, x := range cfg.Currencies {
-		if !keyPattern.MatchString(x.Key) || strings.TrimSpace(x.Name) == "" || len(x.Name) > 100 || seen["c"+x.Key] {
-			return errors.New("invalid currency")
-		}
-		seen["c"+x.Key] = true
-	}
-	for i, x := range cfg.Progression {
-		if x < 0 || (i > 0 && x <= cfg.Progression[i-1]) {
-			return errors.New("invalid progression thresholds")
-		}
-	}
-	for _, x := range cfg.Leaderboards {
-		if !keyPattern.MatchString(x.Key) || seen["l"+x.Key] || (x.Direction != "higher" && x.Direction != "lower") || (x.SeasonStart != nil && x.SeasonEnd != nil && !x.SeasonStart.Before(*x.SeasonEnd)) {
-			return errors.New("invalid leaderboard")
-		}
-		seen["l"+x.Key] = true
-	}
-	return nil
-}
-func (s *Server) applyRuntimeConfig(c *gin.Context, tx pgx.Tx, p, e string, version int, cfg runtimeConfig) error {
-	_, err := tx.Exec(c, `UPDATE item_definitions SET active=false WHERE project_id=$1 AND environment_id=$2`, p, e)
-	if err != nil {
-		return err
-	}
-	for _, x := range cfg.Items {
-		meta, _ := json.Marshal(x.Metadata)
-		if len(meta) == 0 {
-			meta = []byte("{}")
-		}
-		_, err = tx.Exec(c, `INSERT INTO item_definitions(project_id,environment_id,item_key,name,category,stackable,max_stack,metadata,active) VALUES($1,$2,$3,$4,$5,$6,$7,$8,true) ON CONFLICT(project_id,environment_id,item_key) DO UPDATE SET name=EXCLUDED.name,category=EXCLUDED.category,stackable=EXCLUDED.stackable,max_stack=EXCLUDED.max_stack,metadata=EXCLUDED.metadata,active=true`, p, e, x.Key, x.Name, x.Category, x.Stackable, x.MaxStack, meta)
-		if err != nil {
-			return err
-		}
-	}
-	_, err = tx.Exec(c, `UPDATE currency_definitions SET active=false WHERE project_id=$1 AND environment_id=$2`, p, e)
-	if err != nil {
-		return err
-	}
-	for _, x := range cfg.Currencies {
-		_, err = tx.Exec(c, `INSERT INTO currency_definitions(project_id,environment_id,currency_key,name,active) VALUES($1,$2,$3,$4,true) ON CONFLICT(project_id,environment_id,currency_key) DO UPDATE SET name=EXCLUDED.name,active=true`, p, e, x.Key, x.Name)
-		if err != nil {
-			return err
-		}
-	}
-	_, err = tx.Exec(c, `UPDATE leaderboard_definitions SET active=false WHERE project_id=$1 AND environment_id=$2`, p, e)
-	if err != nil {
-		return err
-	}
-	for _, x := range cfg.Leaderboards {
-		_, err = tx.Exec(c, `INSERT INTO leaderboard_definitions(project_id,environment_id,key,score_direction,season_start,season_end,active) VALUES($1,$2,$3,$4,$5,$6,true) ON CONFLICT(project_id,environment_id,key) DO UPDATE SET score_direction=EXCLUDED.score_direction,season_start=EXCLUDED.season_start,season_end=EXCLUDED.season_end,active=true`, p, e, x.Key, x.Direction, x.SeasonStart, x.SeasonEnd)
-		if err != nil {
-			return err
-		}
-	}
-	thresholds, _ := json.Marshal(cfg.Progression)
-	_, err = tx.Exec(c, `INSERT INTO progression_versions(project_id,environment_id,version,thresholds) VALUES($1,$2,$3,$4)`, p, e, version, thresholds)
-	return err
-}

@@ -3,9 +3,10 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -46,7 +47,8 @@ func SeedDemo(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error 
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO configuration_drafts(project_id,environment_id,config) VALUES($1,$2,$3) ON CONFLICT(project_id,environment_id) DO UPDATE SET config=EXCLUDED.config,updated_at=now()`, projectID, envID, demoConfiguration())
+	// Seed the draft only once; restarting the API must not discard the developer's edits.
+	_, err = tx.Exec(ctx, `INSERT INTO configuration_drafts(project_id,environment_id,config) VALUES($1,$2,$3) ON CONFLICT(project_id,environment_id) DO NOTHING`, projectID, envID, demoConfiguration())
 	if err != nil {
 		return err
 	}
@@ -57,26 +59,22 @@ func SeedDemo(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error 
 	}
 	if versions == 0 {
 		cfg := demoRuntimeConfiguration()
-		if err = validateConfig(cfg); err != nil {
-			return err
+		if errs := validateConfig(cfg); len(errs) > 0 {
+			return fmt.Errorf("demo configuration is invalid: %v", errs)
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO configuration_versions(project_id,environment_id,version,config) VALUES($1,$2,1,$3)`, projectID, envID, demoConfiguration())
+		var versionID string
+		err = tx.QueryRow(ctx, `INSERT INTO configuration_versions(project_id,environment_id,version,config,created_by) VALUES($1,$2,1,$3,$4) RETURNING id::text`, projectID, envID, demoConfiguration(), userID).Scan(&versionID)
 		if err != nil {
 			return err
 		}
-		if err = seedRuntimeDefinitions(ctx, tx, projectID, envID, cfg); err != nil {
-			return err
-		}
-		thresholds, _ := json.Marshal(cfg.Progression)
-		_, err = tx.Exec(ctx, `INSERT INTO progression_versions(project_id,environment_id,version,thresholds) VALUES($1,$2,1,$3)`, projectID, envID, thresholds)
-		if err != nil {
+		if _, _, err = applyRuntimeConfig(ctx, tx, projectID, envID, versionID, cfg); err != nil {
 			return err
 		}
 	}
 	var credentialID string
 	err = tx.QueryRow(ctx, `SELECT id::text FROM server_credentials WHERE key_prefix='rs_demo' AND project_id=$1 AND environment_id=$2`, projectID, envID).Scan(&credentialID)
 	if err != nil {
-		_, err = tx.Exec(ctx, `INSERT INTO server_credentials(project_id,environment_id,key_prefix,secret_hash) VALUES($1,$2,'rs_demo',$3)`, projectID, envID, digest(stringsAfterDot(DemoServerCredential)))
+		_, err = tx.Exec(ctx, `INSERT INTO server_credentials(project_id,environment_id,key_prefix,secret_hash) VALUES($1,$2,'rs_demo',$3)`, projectID, envID, digest(strings.SplitN(DemoServerCredential, ".", 2)[1]))
 		if err != nil {
 			return err
 		}
@@ -86,11 +84,23 @@ func SeedDemo(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error 
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO inventory(player_id,project_id,environment_id,item_id,quantity) SELECT $1,$2,$3,id,1 FROM item_definitions WHERE project_id=$2 AND environment_id=$3 AND item_key='health_potion' ON CONFLICT(player_id,item_id) DO UPDATE SET quantity=GREATEST(inventory.quantity,1)`, playerID, projectID, envID)
+	// Starting inventory and balance are granted once, each with a matching ledger row,
+	// so the demo player's balances always reconcile with economy_transactions.
+	_, err = tx.Exec(ctx, `WITH granted AS (
+		INSERT INTO inventory(player_id,project_id,environment_id,item_id,quantity)
+		SELECT $1,$2,$3,id,1 FROM item_definitions WHERE project_id=$2 AND environment_id=$3 AND item_key='health_potion'
+		ON CONFLICT(player_id,item_id) DO NOTHING RETURNING item_id)
+	INSERT INTO economy_transactions(player_id,project_id,environment_id,item_id,operation,quantity,reason,reference)
+	SELECT $1,$2,$3,item_id,'grant',1,'demo_seed','seed' FROM granted`, playerID, projectID, envID)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO balances(player_id,project_id,environment_id,currency_id,amount) SELECT $1,$2,$3,id,5000 FROM currency_definitions WHERE project_id=$2 AND environment_id=$3 AND currency_key='credits' ON CONFLICT(player_id,currency_id) DO UPDATE SET amount=GREATEST(balances.amount,5000)`, playerID, projectID, envID)
+	_, err = tx.Exec(ctx, `WITH credited AS (
+		INSERT INTO balances(player_id,project_id,environment_id,currency_id,amount)
+		SELECT $1,$2,$3,id,5000 FROM currency_definitions WHERE project_id=$2 AND environment_id=$3 AND currency_key='credits'
+		ON CONFLICT(player_id,currency_id) DO NOTHING RETURNING currency_id)
+	INSERT INTO economy_transactions(player_id,project_id,environment_id,currency_id,operation,quantity,balance_after,reason,reference)
+	SELECT $1,$2,$3,currency_id,'credit',5000,5000,'demo_seed','seed' FROM credited`, playerID, projectID, envID)
 	if err != nil {
 		return err
 	}
@@ -103,14 +113,6 @@ func SeedDemo(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error 
 	return nil
 }
 
-func stringsAfterDot(s string) string {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '.' {
-			return s[i+1:]
-		}
-	}
-	return s
-}
 func demoConfiguration() []byte {
 	b, _ := json.Marshal(demoRuntimeConfiguration())
 	return b
@@ -125,23 +127,4 @@ func demoRuntimeConfiguration() runtimeConfig {
 		Progression:  []int64{100, 300, 700, 1500},
 		Leaderboards: []leaderboardConfig{{Key: "global", Direction: "higher"}},
 	}
-}
-func seedRuntimeDefinitions(ctx context.Context, tx pgx.Tx, p, e string, cfg runtimeConfig) error {
-	for _, x := range cfg.Items {
-		meta, _ := json.Marshal(x.Metadata)
-		if _, err := tx.Exec(ctx, `INSERT INTO item_definitions(project_id,environment_id,item_key,name,category,stackable,max_stack,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, p, e, x.Key, x.Name, x.Category, x.Stackable, x.MaxStack, meta); err != nil {
-			return err
-		}
-	}
-	for _, x := range cfg.Currencies {
-		if _, err := tx.Exec(ctx, `INSERT INTO currency_definitions(project_id,environment_id,currency_key,name) VALUES($1,$2,$3,$4)`, p, e, x.Key, x.Name); err != nil {
-			return err
-		}
-	}
-	for _, x := range cfg.Leaderboards {
-		if _, err := tx.Exec(ctx, `INSERT INTO leaderboard_definitions(project_id,environment_id,key,score_direction) VALUES($1,$2,$3,$4)`, p, e, x.Key, x.Direction); err != nil {
-			return err
-		}
-	}
-	return nil
 }

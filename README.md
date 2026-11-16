@@ -24,7 +24,7 @@ The API is at `http://localhost:8080`; health check: `GET /healthz`. Compose exp
 
 These are demo-only credentials. Seed behavior requires **both** `APP_ENV=local` and `DEMO_MODE=true`. The application defaults to `APP_ENV=production`; the example environment file has `DEMO_MODE=false`. Do not deploy the Compose credentials or demo secrets.
 
-All responses use `{ "data": ..., "meta": { "request_id": "..." } }`; errors use `{ "error": { "code": "...", "message": "..." }, "meta": { "request_id": "..." } }`. Authenticated requests accept bearer tokens. Dashboard and player access tokens are JWTs. Send player registration/login the public environment ID; never ship a server credential in a game client. Use an `Idempotency-Key` header on profile patches and item/currency/XP/score mutations.
+All responses use `{ "data": ..., "meta": { "request_id": "..." } }`; errors use `{ "error": { "code": "...", "message": "...", "details": {} }, "meta": { "request_id": "..." } }`. Validation failures list field-level problems in `details.errors` as `[{ "field": "items[2].max_stack", "message": "..." }]`. Authenticated requests accept bearer tokens. Dashboard and player access tokens are JWTs. Send player registration/login the public environment ID; never ship a server credential in a game client. Use an `Idempotency-Key` header on profile patches and item/currency/XP/score mutations.
 
 ### Curl walkthrough
 
@@ -61,13 +61,22 @@ Replace `PLAYER_UUID` with the `player.id` returned at login or registration. Fo
 ### Dashboard (JWT user token)
 
 * `POST /v1/auth/register`, `POST /v1/auth/login`
-* `GET|POST /v1/projects`; `GET|PATCH|DELETE /v1/projects/{projectId}`
+* `GET|POST /v1/projects` (archived projects are listed only with `?include_archived=true`); `GET|PATCH /v1/projects/{projectId}`
+* Projects are never deleted. `PATCH` with `{"status":"archived"}` archives a project: all data is kept, and its server credentials, player registration/login/refresh and public leaderboard reads stop. Already-issued player access tokens run out within their lifetime. `{"status":"active"}` restores it.
 * `GET|POST /v1/projects/{projectId}/environments`
 * `GET|POST /v1/projects/{projectId}/environments/{envId}/credentials` (lists metadata; shows a new credential once)
 * `POST /v1/credentials/{id}/revoke`
 * `GET|PUT /v1/projects/{projectId}/environments/{envId}/configurations/draft`
 * `POST /v1/projects/{projectId}/environments/{envId}/configurations/publish`
 * `GET /v1/projects/{projectId}/environments/{envId}/configurations/versions`
+
+Definition edits change only the draft:
+
+* `GET|POST /v1/projects/{projectId}/environments/{envId}/items`, `GET|PUT|DELETE .../items/{key}` (likewise `currencies` and `leaderboards`). Bodies are validated and unknown fields are rejected.
+* `GET|PUT /v1/projects/{projectId}/environments/{envId}/progression` with `{"thresholds":[100,300,700]}`.
+* `POST .../configurations/validate` validates the request body, or the stored draft when the body is empty, and returns `{"valid":bool,"errors":[...]}` without saving.
+
+Publishing validates the whole draft and answers `422 INVALID_CONFIGURATION` with every field error. It records who published each version. A new progression version is created only when the thresholds change. The direction and season of a leaderboard that already has scores cannot change; start a new season with a new leaderboard key.
 
 Draft JSON has `items`, `currencies`, `progression` (increasing XP thresholds to reach levels 2+), and `leaderboards` arrays. Example:
 
@@ -84,11 +93,11 @@ Supported leaderboard directions are `higher` and `lower`. Optional `season_star
 
 ### Player APIs
 
-* `POST /v1/players/register`, `POST /v1/players/login` accept `public_environment_id` or `environment_id`, email, and password. Both return access and opaque refresh tokens; attempts are rate limited per IP and route.
+* `POST /v1/players/register`, `POST /v1/players/login` accept the public environment identifier (as `public_environment_id`, `environment_id`, or the `X-Public-Environment` header), email, and password. Internal environment UUIDs are not accepted. Both return access and opaque refresh tokens; attempts are rate limited per IP and route.
 * `POST /v1/players/refresh` accepts `{"refresh_token":"..."}` and rotates the token. Reuse of a revoked token revokes its whole family.
 * `GET|PATCH /v1/players/me`; `GET /v1/players/me/inventory[/{itemKey}]`
 * `POST /v1/players/me/inventory/consume|equip|unequip` (equip, unequip, and consume require an idempotency key)
-* `GET /v1/players/me/currency`; `POST /v1/players/me/currency/spend`; `GET /v1/players/me/transactions`
+* `GET /v1/players/me/currency`; `POST /v1/players/me/currency/spend`; `GET /v1/players/me/transactions?limit=50` (newest first; pass `meta.next_cursor` as `?cursor=` for the next page)
 * `GET /v1/players/me/progression`
 * `POST /v1/leaderboards/{key}/scores`; `GET /v1/leaderboards/{key}?environment_id={public_environment_id}&limit=10`
 
@@ -104,7 +113,7 @@ The configured item/currency definitions must be published before use. Grant/con
 
 ## Configuration and checks
 
-Copy `.env.example` to `.env` for direct local runs and set a random JWT secret with at least 32 characters. `docker-compose.yml` is an intentionally local demo setup. `migrations/001_init.sql` creates the schema on API startup. Request bodies default to a 1 MiB maximum. Logs are structured JSON and include request IDs; secrets/passwords are not included.
+Copy `.env.example` to `.env` for direct local runs and set a random JWT secret with at least 32 characters. `docker-compose.yml` is an intentionally local demo setup. SQL files in `migrations/` are applied in order on API startup, under an advisory lock so several instances can start together. Economy, XP and score ledgers are append-only: the database rejects `UPDATE` and `DELETE` on them. Request bodies default to a 1 MiB maximum. Logs are structured JSON and include request IDs; secrets/passwords are not included.
 
 Run tests and static analysis from the repository root:
 
@@ -113,4 +122,10 @@ go test ./...
 go vet ./...
 ```
 
-Use the PostgreSQL service from Compose for a clean schema/demo test. PostgreSQL repository behavior is covered by transaction constraints and the local HTTP walkthrough; the focused Go tests cover configuration validation, token kind/expiry, credential hashing, response envelopes, and UUID formatting.
+PostgreSQL integration tests run when `TEST_DATABASE_URL` is set. To run gofmt, vet, unit and integration tests in containers:
+
+```sh
+docker compose -f docker-compose.test.yml run --rm test
+```
+
+CI (`.github/workflows/ci.yml`) runs the same checks against a PostgreSQL service.

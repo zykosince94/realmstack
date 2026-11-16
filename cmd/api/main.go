@@ -2,8 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -39,10 +44,12 @@ func main() {
 	}
 	cfg := app.Config{
 		Env: env("APP_ENV", "production"), JWTSecret: os.Getenv("JWT_SECRET"),
-		AccessTTL:  duration("ACCESS_TOKEN_TTL", 15*time.Minute),
-		RefreshTTL: duration("REFRESH_TOKEN_TTL", 30*24*time.Hour),
-		BodyLimit:  int64(app.ParseIntEnv("BODY_LIMIT_BYTES", 1<<20)),
-		DemoMode:   os.Getenv("DEMO_MODE") == "true",
+		AccessTTL:      duration("ACCESS_TOKEN_TTL", 15*time.Minute),
+		RefreshTTL:     duration("REFRESH_TOKEN_TTL", 30*24*time.Hour),
+		BodyLimit:      int64(app.ParseIntEnv("BODY_LIMIT_BYTES", 1<<20)),
+		DemoMode:       os.Getenv("DEMO_MODE") == "true",
+		TrustedProxies: list(os.Getenv("TRUSTED_PROXIES")),
+		AuthRateLimit:  app.ParseIntEnv("AUTH_RATE_LIMIT_PER_MINUTE", 30),
 	}
 	if len(cfg.JWTSecret) < 32 {
 		logger.Error("JWT_SECRET must be set to at least 32 characters")
@@ -54,10 +61,29 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	server := app.New(pool, cfg, logger)
-	if err := server.Run(env("HTTP_ADDR", ":8080")); err != nil {
-		logger.Error("http server stopped", "error", err)
-		os.Exit(1)
+	srv := app.New(pool, cfg, logger).HTTPServer(env("HTTP_ADDR", ":8080"))
+
+	// Stop accepting connections on SIGINT/SIGTERM and let in-flight requests finish.
+	stop, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	serveErr := make(chan error, 1)
+	go func() {
+		logger.Info("http server listening", "addr", srv.Addr)
+		serveErr <- srv.ListenAndServe()
+	}()
+	select {
+	case err = <-serveErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("http server stopped", "error", err)
+			os.Exit(1)
+		}
+	case <-stop.Done():
+		logger.Info("shutting down")
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancelShutdown()
+		if err = srv.Shutdown(shutdownCtx); err != nil {
+			logger.Error("graceful shutdown failed", "error", err)
+		}
 	}
 }
 
@@ -73,4 +99,15 @@ func duration(key string, fallback time.Duration) time.Duration {
 		return v
 	}
 	return fallback
+}
+
+// list splits a comma-separated environment value, dropping empty entries.
+func list(v string) []string {
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
