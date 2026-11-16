@@ -93,6 +93,40 @@ func claims(ctx context.Context, q platform.Querier, playerID string) (map[strin
 	return out, rows.Err()
 }
 
+// Completion is whether a player has completed an achievement, and when they claimed
+// it. Quests read it for requires_achievements.
+type Completion struct {
+	Completed bool       // conditions met or already claimed
+	ClaimedAt *time.Time // nil until claimed
+}
+
+// Completions evaluates every active achievement for a player (all-time window).
+// It only reads.
+func Completions(ctx context.Context, q platform.Querier, scope platform.Principal, playerID string) (map[string]Completion, error) {
+	defs, err := Definitions(ctx, q, scope)
+	if err != nil {
+		return nil, err
+	}
+	facts, err := goals.LoadFacts(ctx, q, scope, playerID, goals.Window{})
+	if err != nil {
+		return nil, err
+	}
+	claimed, err := claims(ctx, q, playerID)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]Completion, len(defs))
+	for _, d := range defs {
+		c := Completion{Completed: goals.AllMet(goals.Evaluate(d.Conditions, facts))}
+		if cl, ok := claimed[d.ID]; ok {
+			at := cl.At
+			c.Completed, c.ClaimedAt = true, &at
+		}
+		out[d.Key] = c
+	}
+	return out, nil
+}
+
 // view renders one achievement for a player. When mask is set, a hidden achievement
 // that is not yet completed shows only its key and status.
 func view(d Definition, progress []goals.Progress, cl *claim, mask bool) gin.H {
@@ -213,11 +247,11 @@ func (h Handler) claim(c *gin.Context, actor platform.Principal, by string) {
 		rewards, _ := json.Marshal(d.Rewards)
 		var claimID string
 		var claimedAt time.Time
-		if err = tx.QueryRow(c, `INSERT INTO achievement_claims(player_id,project_id,environment_id,achievement_id,rewards,claimed_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING id::text,claimed_at`,
-			actor.ID, actor.ProjectID, actor.EnvironmentID, d.ID, rewards, by).Scan(&claimID, &claimedAt); err != nil {
+		if err = tx.QueryRow(c, `INSERT INTO achievement_claims(player_id,project_id,environment_id,achievement_id,rewards,claimed_by,claimed_at) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id::text,claimed_at`,
+			actor.ID, actor.ProjectID, actor.EnvironmentID, d.ID, rewards, by, h.Now()).Scan(&claimID, &claimedAt); err != nil {
 			return 0, nil, err
 		}
-		if err = goals.ApplyRewards(c, tx, actor, actor.ID, d.Rewards, goals.SourceAchievement, "achievement:"+d.Key, "achievement-claim:"+claimID); err != nil {
+		if err = goals.ApplyRewards(c, tx, actor, actor.ID, d.Rewards, goals.SourceAchievement, "achievement:"+d.Key, "achievement-claim:"+claimID, claimedAt); err != nil {
 			return 0, nil, err
 		}
 		return http.StatusOK, gin.H{"key": d.Key, "status": StatusClaimed, "claimed_by": by, "claimed_at": claimedAt, "rewards": d.Rewards}, nil

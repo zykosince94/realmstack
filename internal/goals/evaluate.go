@@ -12,7 +12,7 @@ import (
 )
 
 // Window is a counting window [From, Until). nil bounds are open; achievements count
-// all time, quests (Phase 6) count from acceptance.
+// all time, quests count from acceptance (see quests.Evaluator).
 type Window struct {
 	From, Until *time.Time
 }

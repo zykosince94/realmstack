@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
@@ -43,7 +44,7 @@ type Award struct {
 // AwardXP adds amount to the player's XP inside tx, tagged with source. A new player
 // pins to the latest progression version; an existing player keeps their pinned one,
 // which RETURNING reports. Callers must hold the player row lock (platform.LockPlayer).
-func AwardXP(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID string, amount int64, source, reason, reference, key string) (Award, error) {
+func AwardXP(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID string, amount int64, source, reason, reference, key string, at time.Time) (Award, error) {
 	if amount <= 0 || amount > 1e9 {
 		return Award{}, platform.Errf(http.StatusUnprocessableEntity, "VALIDATION_ERROR", "XP amount must be positive and within limits.")
 	}
@@ -70,8 +71,8 @@ func AwardXP(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID 
 	_ = json.Unmarshal(raw, &thresholds)
 	a.Level = LevelFor(thresholds, a.TotalXP)
 	a.LeveledUp = a.Level > LevelFor(thresholds, a.TotalXP-amount)
-	_, err = tx.Exec(ctx, `INSERT INTO xp_transactions(player_id,project_id,environment_id,progression_version_id,amount,reason,reference,idempotency_key,request_hash,source) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		playerID, scope.ProjectID, scope.EnvironmentID, a.VersionID, amount, reason, reference, key, platform.Digest(fmt.Sprint(amount, reason, reference)), source)
+	_, err = tx.Exec(ctx, `INSERT INTO xp_transactions(player_id,project_id,environment_id,progression_version_id,amount,reason,reference,idempotency_key,request_hash,source,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		playerID, scope.ProjectID, scope.EnvironmentID, a.VersionID, amount, reason, reference, key, platform.Digest(fmt.Sprint(amount, reason, reference)), source, at)
 	return a, err
 }
 
@@ -97,7 +98,7 @@ func (h Handler) AwardHandler(c *gin.Context) {
 		if err := platform.LockPlayer(c, tx, actor, actor.ID); err != nil {
 			return 0, nil, err
 		}
-		a, err := AwardXP(c, tx, actor, actor.ID, in.Amount, "api", in.Reason, in.Reference, platform.IdempotencyKey(c))
+		a, err := AwardXP(c, tx, actor, actor.ID, in.Amount, "api", in.Reason, in.Reference, platform.IdempotencyKey(c), h.Now())
 		return http.StatusOK, a, err
 	})
 }

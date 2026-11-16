@@ -67,8 +67,8 @@ func (h Handler) Increment(c *gin.Context) {
 		if err != nil {
 			return 0, nil, err
 		}
-		_, err = tx.Exec(c, `INSERT INTO stat_transactions(player_id,project_id,environment_id,stat_definition_id,operation,amount,reason,reference) VALUES($1,$2,$3,$4,'increment',$5,$6,$7)`,
-			actor.ID, actor.ProjectID, actor.EnvironmentID, id, in.Amount, in.Reason, in.Reference)
+		_, err = tx.Exec(c, `INSERT INTO stat_transactions(player_id,project_id,environment_id,stat_definition_id,operation,amount,reason,reference,created_at) VALUES($1,$2,$3,$4,'increment',$5,$6,$7,$8)`,
+			actor.ID, actor.ProjectID, actor.EnvironmentID, id, in.Amount, in.Reason, in.Reference, h.Now())
 		return http.StatusOK, gin.H{"stat_key": key, "incremented": in.Amount, "value": value}, err
 	})
 }
@@ -100,8 +100,8 @@ func (h Handler) SetFlag(c *gin.Context) {
 		}
 		newlySet := tag.RowsAffected() == 1
 		if newlySet {
-			if _, err = tx.Exec(c, `INSERT INTO stat_transactions(player_id,project_id,environment_id,stat_definition_id,operation,amount,reason,reference) VALUES($1,$2,$3,$4,'set_flag',1,$5,$6)`,
-				actor.ID, actor.ProjectID, actor.EnvironmentID, id, in.Reason, in.Reference); err != nil {
+			if _, err = tx.Exec(c, `INSERT INTO stat_transactions(player_id,project_id,environment_id,stat_definition_id,operation,amount,reason,reference,created_at) VALUES($1,$2,$3,$4,'set_flag',1,$5,$6,$7)`,
+				actor.ID, actor.ProjectID, actor.EnvironmentID, id, in.Reason, in.Reference, h.Now()); err != nil {
 				return 0, nil, err
 			}
 		}

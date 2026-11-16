@@ -1,6 +1,6 @@
 # RealmStack backend
 
-A Go/Gin modular monolith backed by PostgreSQL. It provides dashboard authentication and tenant-owned projects/environments, hashed/revocable server credentials, player registration and rotating refresh tokens, published environment configuration, inventory/economy, pinned XP progression, PostgreSQL leaderboards, server-reported stats and flags, and achievements on a shared goal engine. Redis, quests and AI features are not included yet.
+A Go/Gin modular monolith backed by PostgreSQL. It provides dashboard authentication and tenant-owned projects/environments, hashed/revocable server credentials, player registration and rotating refresh tokens, published environment configuration, inventory/economy, pinned XP progression, PostgreSQL leaderboards, server-reported stats and flags, and achievements and quests on a shared goal engine. Redis and AI features are not included yet.
 
 **The API contract is [`api/openapi.yaml`](api/openapi.yaml).** Every route is documented there, `TestOpenAPICoversEveryRoute` fails when routes and the document disagree, and the frontend generates its TypeScript client from it. Update it in the same change as any route.
 
@@ -22,12 +22,13 @@ internal/leaderboards/   score submissions and deterministic ranking
 internal/stats/          server-reported counters and flags
 internal/goals/          shared goal engine: conditions, validation, LoadFacts/Evaluate, ApplyRewards
 internal/achievements/   achievement progress, hidden masking, claims, claim statistics
+internal/quests/         quest periods, pure status evaluation, accept/abandon/claim, quest statistics
 internal/demo/           local demo seed
 migrations/              numbered SQL files
 api/openapi.yaml         API contract
 ```
 
-Packages import `platform` and each other only downward (`achievements` → `goals` → `inventory`/`economy`/`progression` → `platform`), so there are no cycles; `httpapi` wires everything together.
+Packages import `platform` and each other only downward (`quests` → `achievements` → `goals` → `inventory`/`economy`/`progression` → `platform`), so there are no cycles; `httpapi` wires everything together.
 
 This folder is an independent Git repository. The integrated Compose setup is owned by the sibling `realmstack-frontend/` repository and builds this API from the sibling path; keep both repositories side-by-side to run the full dashboard + API demo. The Go source walkthrough is in `../study/realmstack-backend-guide.html` when using the original workspace.
 
@@ -99,15 +100,16 @@ Replace `PLAYER_UUID` with the `player.id` returned at login or registration. Fo
 
 Definition edits change only the draft:
 
-* `GET|POST /v1/projects/{projectId}/environments/{envId}/items`, `GET|PUT|DELETE .../items/{key}` (likewise `currencies`, `leaderboards`, `stats` and `achievements`). Bodies are validated and unknown fields are rejected; a single achievement is shape-checked here and its references are checked by validate and publish.
+* `GET|POST /v1/projects/{projectId}/environments/{envId}/items`, `GET|PUT|DELETE .../items/{key}` (likewise `currencies`, `leaderboards`, `stats`, `achievements` and `quests`). Bodies are validated and unknown fields are rejected; a single achievement or quest is shape-checked here and its references (and quest prerequisite cycles) are checked by validate and publish.
 * `GET|PUT /v1/projects/{projectId}/environments/{envId}/progression` with `{"thresholds":[100,300,700]}`.
 * `POST .../configurations/validate` validates the request body, or the stored draft when the body is empty, and returns `{"valid":bool,"errors":[...]}` without saving.
 
 * `GET /v1/projects/{projectId}/environments/{envId}/achievements/stats` returns claim counts per published achievement (no player identifiers).
+* `GET /v1/projects/{projectId}/environments/{envId}/quests/stats` returns acceptance, abandon and claim counts per published quest, summed over all periods (no player identifiers).
 
-Publishing validates the whole draft and answers `422 INVALID_CONFIGURATION` with every field error, such as `achievements[2].conditions[0].stat_key`. It records who published each version. A new progression version is created only when the thresholds change. The direction and season of a leaderboard that already has scores cannot change; start a new season with a new leaderboard key. Likewise a stat cannot switch between counter and flag once values were recorded.
+Publishing validates the whole draft and answers `422 INVALID_CONFIGURATION` with every field error, such as `achievements[2].conditions[0].stat_key`. It records who published each version. A new progression version is created only when the thresholds change. The direction and season of a leaderboard that already has scores cannot change; start a new season with a new leaderboard key. Likewise a stat cannot switch between counter and flag once values were recorded, and once players have accepted or claimed a quest its `repeat` mode is fixed and its existing stages must stay first and in order (new stages may be appended). Acceptances and claims are stored per period and stage index, so those changes would silently change what the history means; use a new quest key instead.
 
-Draft JSON has `items`, `currencies`, `progression` (increasing XP thresholds to reach levels 2+), `leaderboards`, `stats` and `achievements` arrays. Example:
+Draft JSON has `items`, `currencies`, `progression` (increasing XP thresholds to reach levels 2+), `leaderboards`, `stats`, `achievements` and `quests` arrays, plus an optional `editor_layout` object (quest node positions saved by the dashboard; publishing ignores it). Example:
 
 ```json
 {
@@ -121,6 +123,24 @@ Draft JSON has `items`, `currencies`, `progression` (increasing XP thresholds to
     "rewards":{"currencies":[{"currency_key":"credits","amount":10}],"xp":50},"claimable_by":"player"}]
 }
 ```
+
+Quests (`quests` array) reuse the condition set and reward shape:
+
+```json
+{"key":"into_the_mine","name":"Into the Mine","chain":"Main Story","requires_quests":["the_awakening"],"requires_achievements":[],
+ "repeat":"none","auto_accept":false,"claimable_by":"player","available_from":null,"available_until":null,
+ "stages":[{"key":"enter","name":"Enter the old mine","conditions":[{"type":"flag","flag_key":"entered_mine"}],"rewards":{"currencies":[{"currency_key":"credits","amount":50}]}},
+           {"key":"ore","name":"Defeat 5 enemies","conditions":[{"type":"stat","stat_key":"enemies_defeated","target":5}]}],
+ "rewards":{"xp":200}}
+```
+
+* 1–20 ordered stages, each with 1–5 conditions and optional rewards; optional completion rewards. Validation also rejects unknown or self prerequisites, prerequisite cycles (reported on the edge that closes the loop, e.g. `quests[1].requires_quests[0]`), duplicate stage keys, `available_from` not before `available_until`, and unknown `repeat` values.
+* Status, first match wins: `claimed` (completion claimed this period) → `locked` (a required quest or achievement is not completed) → `upcoming` → `expired` (window closed, not complete) → `completed` → `active` → `available`. A required quest counts as completed once its completion reward was claimed in any period, or, for a non-repeating quest, as soon as it is complete.
+* Progress counts `source='api'` ledger rows from acceptance (or the later start of the current period) until the earlier of the period end and `available_until`. Flags and `level_reached` are state and ignore the window. Stages complete strictly in order, but a counted condition counts everything in the window whichever stage is current; when a step must happen after another, have the game server set a flag.
+* `repeat: daily` resets at 00:00 UTC (period key `2026-11-16`), `weekly` at Monday 00:00 UTC (ISO week `2026-W47`). Acceptances and claims are unique per player, quest and period.
+* An `auto_accept` quest is active without a call. It counts from when it became available: the latest of its publish time (`activated_at`), the period start, `available_from`, and the recorded claim times of its prerequisites. A prerequisite that completed without a claim has no recorded time, so the window then starts at the latest of the others. Abandoning an auto-accepted quest records the opt-out; the player can accept it again manually.
+* Abandoning returns an active quest to `available` and keeps claimed rewards; accepting again sets a new acceptance time, so progress restarts, and stage rewards already claimed this period are not paid again.
+* A claim pays every earned, unclaimed stage reward plus the completion reward in one transaction. Ledger rows are tagged `source='quest'`.
 
 Achievement conditions come from a closed set: `xp_total`, `level_reached`, `item_granted`, `item_consumed` (omit `item_key` for any item), `currency_earned`, `currency_spent`, `leaderboard_score`, `stat` and `flag`. Each type accepts only its own fields; 1–5 conditions, all must be met. Progress is computed on read from the immutable ledgers, counting only rows with `source='api'`, so rewards paid by a claim never complete another goal. `level_reached` uses the player's pinned curve and API-awarded XP for the same reason (a deliberate reading of spec 6.4).
 
@@ -137,6 +157,8 @@ Supported leaderboard directions are `higher` and `lower`. Optional `season_star
 * `GET /v1/players/me/stats` (own counters and flags)
 * `GET /v1/players/me/achievements` (status `in_progress` / `completed` / `claimed` with per-condition progress; a hidden achievement still in progress shows only its key and status)
 * `POST /v1/players/me/achievements/{key}/claim` (claim policy `player` only; `409 ALREADY_CLAIMED`, `422 NOT_COMPLETED`, `403 CLAIM_NOT_ALLOWED`)
+* `GET /v1/players/me/quests` (quest log: status, current stage, per-stage progress, claimable rewards, `resets_at` / `expires_at`)
+* `POST /v1/players/me/quests/{key}/accept` (`409 QUEST_ALREADY_ACTIVE` / `ALREADY_CLAIMED`; `422 QUEST_LOCKED`, `QUEST_NOT_AVAILABLE`, `QUEST_EXPIRED`), `.../abandon` (`422 QUEST_NOT_ACTIVE`), `.../claim` (claim policy `player`; `409 ALREADY_CLAIMED`, `422 NOT_COMPLETED`)
 * `POST /v1/leaderboards/{key}/scores`; `GET /v1/leaderboards/{key}?environment_id={public_environment_id}&limit=10`
 
 ### Trusted server APIs (environment-scoped credential)
@@ -148,12 +170,13 @@ Supply `X-Server-Credential: {credential}`:
 * `POST /v1/server/players/{playerId}/xp/award`
 * `GET /v1/server/players/{playerId}/stats`; `POST .../stats/{statKey}/increment` (`{"amount":3}`, positive only); `POST .../flags/{flagKey}/set` (body optional; set-only)
 * `GET /v1/server/players/{playerId}/achievements` (unmasked); `POST .../achievements/{key}/claim` (any claim policy)
+* `GET /v1/server/players/{playerId}/quests`; `POST .../quests/{key}/accept|claim` (claim works for any claim policy)
 
-The configured item/currency definitions must be published before use. Grant/consume quantities and credit/spend amounts must be positive. Economy, XP, stat and claim writes use one transaction, a scoped idempotency record and an immutable ledger entry (`platform.Env.Mutate`). A claim pays every reward with the normal stack and balance rules; if any reward fails (for example a full stack) the whole claim rolls back. A key replay with the same normalized request returns the saved result; reuse with a different payload yields HTTP 409.
+The configured item/currency definitions must be published before use. Grant/consume quantities and credit/spend amounts must be positive. Economy, XP, stat, quest and claim writes use one transaction, a scoped idempotency record and an immutable ledger entry (`platform.Env.Mutate`). Ledger rows are stamped with the request clock (`Env.Now`), the same clock that stamps quest acceptances, so quest windows compare like with like (and tests can move time). A claim pays every reward with the normal stack and balance rules; if any reward fails (for example a full stack) the whole claim rolls back. A key replay with the same normalized request returns the saved result; reuse with a different payload yields HTTP 409.
 
 ## Configuration and checks
 
-Copy `.env.example` to `.env` for direct local runs and set a random JWT secret with at least 32 characters. `docker-compose.yml` is an intentionally local demo setup. SQL files in `migrations/` are applied in order on API startup, under an advisory lock so several instances can start together. Economy, XP and score ledgers are append-only: the database rejects `UPDATE` and `DELETE` on them. Request bodies default to a 1 MiB maximum. Logs are structured JSON and include request IDs; secrets/passwords are not included.
+Copy `.env.example` to `.env` for direct local runs and set a random JWT secret with at least 32 characters. `docker-compose.yml` is an intentionally local demo setup. SQL files in `migrations/` are applied in order on API startup, under an advisory lock so several instances can start together. Economy, XP, score, stat and claim ledgers (including `quest_claims`) are append-only: the database rejects `UPDATE` and `DELETE` on them. `player_quests` is state, not a ledger, so it changes on abandon and re-accept. Request bodies default to a 1 MiB maximum. Logs are structured JSON and include request IDs; secrets/passwords are not included.
 
 Run tests and static analysis from the repository root:
 

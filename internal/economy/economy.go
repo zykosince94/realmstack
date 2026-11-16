@@ -49,7 +49,7 @@ func validAmount(amount int64) error {
 // Credit adds amount to the player's balance inside tx and writes the ledger row
 // tagged with source. One atomic upsert: the conflict update locks the balance row and
 // re-checks the cap. It returns the new balance.
-func Credit(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, currencyKey string, amount int64, source, reason, reference string) (int64, error) {
+func Credit(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, currencyKey string, amount int64, source, reason, reference string, at time.Time) (int64, error) {
 	if err := validAmount(amount); err != nil {
 		return 0, err
 	}
@@ -67,13 +67,13 @@ func Credit(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, 
 	if err != nil {
 		return 0, err
 	}
-	return after, insertLedger(ctx, tx, scope, playerID, id, "credit", amount, after, source, reason, reference)
+	return after, insertLedger(ctx, tx, scope, playerID, id, "credit", amount, after, source, reason, reference, at)
 }
 
 // Spend removes amount from the player's balance inside tx. The WHERE clause is the
 // funds check and is re-evaluated after the row lock, so concurrent spends can never
 // overdraw. It returns the new balance.
-func Spend(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, currencyKey string, amount int64, reason, reference string) (int64, error) {
+func Spend(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, currencyKey string, amount int64, reason, reference string, at time.Time) (int64, error) {
 	if err := validAmount(amount); err != nil {
 		return 0, err
 	}
@@ -89,12 +89,12 @@ func Spend(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, c
 	if err != nil {
 		return 0, err
 	}
-	return after, insertLedger(ctx, tx, scope, playerID, id, "spend", amount, after, "api", reason, reference)
+	return after, insertLedger(ctx, tx, scope, playerID, id, "spend", amount, after, "api", reason, reference, at)
 }
 
-func insertLedger(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, currencyID, operation string, amount, after int64, source, reason, reference string) error {
-	_, err := tx.Exec(ctx, `INSERT INTO economy_transactions(player_id,project_id,environment_id,currency_id,operation,quantity,balance_after,reason,reference,source) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		playerID, scope.ProjectID, scope.EnvironmentID, currencyID, operation, amount, after, reason, reference, source)
+func insertLedger(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, currencyID, operation string, amount, after int64, source, reason, reference string, at time.Time) error {
+	_, err := tx.Exec(ctx, `INSERT INTO economy_transactions(player_id,project_id,environment_id,currency_id,operation,quantity,balance_after,reason,reference,source,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		playerID, scope.ProjectID, scope.EnvironmentID, currencyID, operation, amount, after, reason, reference, source, at)
 	return err
 }
 
@@ -113,7 +113,7 @@ func (h Handler) CreditHandler(c *gin.Context) {
 		return
 	}
 	h.Mutate(c, actor, in, func(tx pgx.Tx) (int, any, error) {
-		balance, err := Credit(c, tx, actor, actor.ID, in.CurrencyKey, in.Amount, "api", in.Reason, in.Reference)
+		balance, err := Credit(c, tx, actor, actor.ID, in.CurrencyKey, in.Amount, "api", in.Reason, in.Reference, h.Now())
 		return http.StatusOK, result(in, "credit", balance), err
 	})
 }
@@ -130,7 +130,7 @@ func (h Handler) SpendHandler(c *gin.Context) {
 	}
 	p := platform.GetPrincipal(c)
 	h.Mutate(c, p, in, func(tx pgx.Tx) (int, any, error) {
-		balance, err := Spend(c, tx, p, p.ID, in.CurrencyKey, in.Amount, in.Reason, in.Reference)
+		balance, err := Spend(c, tx, p, p.ID, in.CurrencyKey, in.Amount, in.Reason, in.Reference, h.Now())
 		return http.StatusOK, result(in, "spend", balance), err
 	})
 }

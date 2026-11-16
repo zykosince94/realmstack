@@ -1,5 +1,5 @@
-// Package goals is the shared goal engine used by achievements (and, in Phase 6,
-// quests): a closed set of declarative conditions, their validation, deterministic
+// Package goals is the shared goal engine used by achievements and quests: a
+// closed set of declarative conditions, their validation, deterministic
 // evaluation from the immutable ledgers, and transactional reward application.
 //
 // There are no scripts or expressions. Progress is derived only from ledger rows

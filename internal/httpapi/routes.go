@@ -14,6 +14,7 @@ import (
 	"realmstack-backend/internal/players"
 	"realmstack-backend/internal/progression"
 	"realmstack-backend/internal/projects"
+	"realmstack-backend/internal/quests"
 	"realmstack-backend/internal/stats"
 )
 
@@ -31,6 +32,7 @@ func (s *Server) routes() {
 	leaderboardsH := leaderboards.Handler{Env: env}
 	statsH := stats.Handler{Env: env}
 	achievementsH := achievements.Handler{Env: env}
+	questsH := quests.Handler{Env: env}
 
 	r := s.router
 	r.GET("/healthz", func(c *gin.Context) { platform.Success(c, http.StatusOK, gin.H{"status": "ok"}) })
@@ -64,6 +66,7 @@ func (s *Server) routes() {
 	environment.GET("/progression", catalogH.GetProgression)
 	environment.PUT("/progression", catalogH.PutProgression)
 	environment.GET("/achievements/stats", achievementsH.Stats)
+	environment.GET("/quests/stats", questsH.Stats)
 	for _, name := range catalog.DraftCollections {
 		kind := catalog.DefinitionKinds[name]
 		environment.GET("/"+name, catalogH.ListDefinitions(kind))
@@ -94,6 +97,10 @@ func (s *Server) routes() {
 	me.GET("/stats", statsH.Mine)
 	me.GET("/achievements", achievementsH.Mine)
 	me.POST("/achievements/:key/claim", achievementsH.ClaimMine)
+	me.GET("/quests", questsH.Mine)
+	me.POST("/quests/:key/accept", questsH.AcceptMine)
+	me.POST("/quests/:key/abandon", questsH.AbandonMine)
+	me.POST("/quests/:key/claim", questsH.ClaimMine)
 
 	// Trusted game server (server credential; scope comes from the credential).
 	server := v.Group("/server/players/:playerId", s.serverAuth())
@@ -105,6 +112,9 @@ func (s *Server) routes() {
 	server.POST("/flags/:flagKey/set", statsH.SetFlag)
 	server.GET("/achievements", achievementsH.ForPlayer)
 	server.POST("/achievements/:key/claim", achievementsH.ClaimForPlayer)
+	server.GET("/quests", questsH.ForPlayer)
+	server.POST("/quests/:key/accept", questsH.AcceptForPlayer)
+	server.POST("/quests/:key/claim", questsH.ClaimForPlayer)
 
 	// Leaderboards.
 	v.POST("/leaderboards/:key/scores", s.playerAuth(), leaderboardsH.Submit)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
@@ -39,7 +40,7 @@ func Slot(metadata map[string]any) (string, bool) {
 // ledger row tagged with source ("api", "achievement" or "quest"). The conflict update
 // locks the stack and re-checks the limit, so concurrent grants can never exceed
 // max_stack. It returns the new stack size.
-func Grant(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, itemKey string, quantity int64, source, reason, reference string) (int64, error) {
+func Grant(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, itemKey string, quantity int64, source, reason, reference string, at time.Time) (int64, error) {
 	if quantity <= 0 || quantity > 1e9 {
 		return 0, platform.Errf(http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Quantity must be positive and within limits.")
 	}
@@ -66,8 +67,8 @@ func Grant(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, i
 	if err != nil {
 		return 0, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO economy_transactions(player_id,project_id,environment_id,item_id,operation,quantity,reason,reference,source) VALUES($1,$2,$3,$4,'grant',$5,$6,$7,$8)`,
-		playerID, scope.ProjectID, scope.EnvironmentID, itemID, quantity, reason, reference, source)
+	_, err = tx.Exec(ctx, `INSERT INTO economy_transactions(player_id,project_id,environment_id,item_id,operation,quantity,reason,reference,source,created_at) VALUES($1,$2,$3,$4,'grant',$5,$6,$7,$8,$9)`,
+		playerID, scope.ProjectID, scope.EnvironmentID, itemID, quantity, reason, reference, source, at)
 	return after, err
 }
 
@@ -82,7 +83,7 @@ func (h Handler) GrantHandler(c *gin.Context) {
 		return
 	}
 	h.Mutate(c, actor, in, func(tx pgx.Tx) (int, any, error) {
-		owned, err := Grant(c, tx, actor, actor.ID, in.ItemKey, in.Quantity, "api", in.Reason, in.Reference)
+		owned, err := Grant(c, tx, actor, actor.ID, in.ItemKey, in.Quantity, "api", in.Reason, in.Reference, h.Now())
 		if err != nil {
 			return 0, nil, err
 		}
@@ -171,8 +172,8 @@ func (h Handler) Consume(c *gin.Context) {
 			}
 			unequipped = tag.RowsAffected() > 0
 		}
-		if _, err = tx.Exec(c, `INSERT INTO economy_transactions(player_id,project_id,environment_id,item_id,operation,quantity,reason,reference) VALUES($1,$2,$3,$4,'consume',$5,$6,$7)`,
-			p.ID, p.ProjectID, p.EnvironmentID, itemID, in.Quantity, in.Reason, in.Reference); err != nil {
+		if _, err = tx.Exec(c, `INSERT INTO economy_transactions(player_id,project_id,environment_id,item_id,operation,quantity,reason,reference,created_at) VALUES($1,$2,$3,$4,'consume',$5,$6,$7,$8)`,
+			p.ID, p.ProjectID, p.EnvironmentID, itemID, in.Quantity, in.Reason, in.Reference, h.Now()); err != nil {
 			return 0, nil, err
 		}
 		return http.StatusOK, gin.H{"item_key": in.ItemKey, "consumed": in.Quantity, "remaining": after, "unequipped": unequipped}, nil

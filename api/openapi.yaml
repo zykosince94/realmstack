@@ -4,7 +4,7 @@
 openapi: "3.0.3"
 info:
   title: "RealmStack API"
-  version: "0.5.0"
+  version: "0.6.0"
   description: "Multi-tenant game backend. Every response uses {data, meta}; every error uses {error:{code,message,details}, meta}. Mutations require an Idempotency-Key: a replay returns the stored result and status, a different request with the same key returns 409. This document is the API contract: the frontend generates its client from it, and a backend test fails if a route is missing here."
 servers:
   - url: "http://localhost:8080"
@@ -20,6 +20,7 @@ tags:
   - name: leaderboards
   - name: stats
   - name: achievements
+  - name: quests
 paths:
   "/healthz":
     get:
@@ -3246,6 +3247,588 @@ paths:
           "$ref": "#/components/responses/E401"
         "404":
           "$ref": "#/components/responses/E404"
+  "/v1/projects/{projectId}/environments/{envId}/quests/stats":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidQuestsStats
+      tags:
+        - quests
+      summary: "Acceptance and claim counts per published quest, over all periods. No player identifiers."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/QuestStat"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/projects/{projectId}/environments/{envId}/quests":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidQuests
+      tags:
+        - configuration
+      summary: "List quests in the draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/QuestDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    post:
+      operationId: postProjectsByProjectidEnvironmentsByEnvidQuests
+      tags:
+        - configuration
+      summary: "Add a quest to the draft (409 if the key exists). Prerequisites and references are checked by validate and publish."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/QuestDefinition"
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/QuestDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/quests/{key}":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidQuestsByKey
+      tags:
+        - configuration
+      summary: "Read a draft quest."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Quest key."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/QuestDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    put:
+      operationId: putProjectsByProjectidEnvironmentsByEnvidQuestsByKey
+      tags:
+        - configuration
+      summary: "Replace a draft quest; the body key may be omitted."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Quest key."
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/QuestDefinition"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/QuestDefinition"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+    delete:
+      operationId: deleteProjectsByProjectidEnvironmentsByEnvidQuestsByKey
+      tags:
+        - configuration
+      summary: "Remove a quest from the draft."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Quest key."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Deleted"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/players/me/quests":
+    get:
+      operationId: getPlayersMeQuests
+      tags:
+        - quests
+      summary: "Quest log: every quest with status, current stage, per-stage progress, claimable rewards and reset or expiry time."
+      security:
+        - playerBearer: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/PlayerQuest"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/players/me/quests/{key}/accept":
+    post:
+      operationId: postPlayersMeQuestsByKeyAccept
+      tags:
+        - quests
+      summary: "Accept an available quest. 409 QUEST_ALREADY_ACTIVE or ALREADY_CLAIMED; 422 QUEST_LOCKED, QUEST_NOT_AVAILABLE or QUEST_EXPIRED."
+      security:
+        - playerBearer: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: "Quest key."
+          schema:
+            type: string
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/PlayerQuest"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/players/me/quests/{key}/abandon":
+    post:
+      operationId: postPlayersMeQuestsByKeyAbandon
+      tags:
+        - quests
+      summary: "Abandon an active quest; it returns to available and claimed rewards are kept. 422 QUEST_NOT_ACTIVE."
+      security:
+        - playerBearer: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: "Quest key."
+          schema:
+            type: string
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/PlayerQuest"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/players/me/quests/{key}/claim":
+    post:
+      operationId: postPlayersMeQuestsByKeyClaim
+      tags:
+        - quests
+      summary: "Claim every earned stage reward plus the completion reward (claim policy player). 403 CLAIM_NOT_ALLOWED; 409 ALREADY_CLAIMED; 422 NOT_COMPLETED, QUEST_NOT_ACTIVE or QUEST_LOCKED."
+      security:
+        - playerBearer: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: "Quest key."
+          schema:
+            type: string
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/QuestClaimResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "403":
+          "$ref": "#/components/responses/E403"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/server/players/{playerId}/quests":
+    get:
+      operationId: getServerPlayersByPlayeridQuests
+      tags:
+        - quests
+      summary: "A player's quest log for a trusted game server."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/PlayerQuest"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/server/players/{playerId}/quests/{key}/accept":
+    post:
+      operationId: postServerPlayersByPlayeridQuestsByKeyAccept
+      tags:
+        - quests
+      summary: "Accept a quest on the player's behalf."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Quest key."
+          schema:
+            type: string
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/PlayerQuest"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/server/players/{playerId}/quests/{key}/claim":
+    post:
+      operationId: postServerPlayersByPlayeridQuestsByKeyClaim
+      tags:
+        - quests
+      summary: "Claim a quest's earned rewards on the player's behalf (any claim policy)."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+        - name: key
+          in: path
+          required: true
+          description: "Quest key."
+          schema:
+            type: string
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/QuestClaimResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
 components:
   securitySchemes:
     userBearer:
@@ -3320,6 +3903,324 @@ components:
           schema:
             "$ref": "#/components/schemas/ErrorResponse"
   schemas:
+    QuestStage:
+      type: object
+      properties:
+        key:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+        name:
+          type: string
+        conditions:
+          type: array
+          items:
+            "$ref": "#/components/schemas/Condition"
+          minItems: 1
+          maxItems: 5
+        rewards:
+          "$ref": "#/components/schemas/Rewards"
+      required:
+        - key
+        - name
+        - conditions
+    QuestDefinition:
+      type: object
+      properties:
+        key:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+        name:
+          type: string
+        description:
+          type: string
+        chain:
+          type: string
+          description: "Optional grouping label, e.g. Main Story."
+        requires_quests:
+          type: array
+          items:
+            type: string
+          nullable: true
+        requires_achievements:
+          type: array
+          items:
+            type: string
+          nullable: true
+        stages:
+          type: array
+          items:
+            "$ref": "#/components/schemas/QuestStage"
+          minItems: 1
+          maxItems: 20
+        rewards:
+          "$ref": "#/components/schemas/Rewards"
+        claimable_by:
+          type: string
+          enum:
+            - player
+            - server
+          default: player
+        auto_accept:
+          type: boolean
+        repeat:
+          type: string
+          enum:
+            - none
+            - daily
+            - weekly
+          default: none
+        available_from:
+          type: string
+          format: date-time
+          nullable: true
+        available_until:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - key
+        - name
+        - stages
+    PlayerQuestStage:
+      type: object
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+        conditions:
+          type: array
+          items:
+            "$ref": "#/components/schemas/Condition"
+        rewards:
+          "$ref": "#/components/schemas/Rewards"
+        progress:
+          type: array
+          items:
+            "$ref": "#/components/schemas/ConditionProgress"
+          nullable: true
+          description: "Null unless the quest is accepted (or auto-accepted) in this period."
+        complete:
+          type: boolean
+          description: "Conditions met inside the quest window and every earlier stage complete."
+        claimed:
+          type: boolean
+      required:
+        - key
+        - name
+        - conditions
+        - rewards
+        - progress
+        - complete
+        - claimed
+    PlayerQuest:
+      type: object
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        chain:
+          type: string
+          nullable: true
+        repeat:
+          type: string
+          enum:
+            - none
+            - daily
+            - weekly
+        auto_accept:
+          type: boolean
+        claimable_by:
+          type: string
+          enum:
+            - player
+            - server
+        requires_quests:
+          type: array
+          items:
+            type: string
+        requires_achievements:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum:
+            - claimed
+            - locked
+            - upcoming
+            - expired
+            - completed
+            - active
+            - available
+        period_key:
+          type: string
+          description: "Empty for non-repeating quests, YYYY-MM-DD (UTC) for daily, YYYY-Www for weekly."
+        accepted_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "When progress started counting (for auto-accepted quests, when the quest became available)."
+        auto_accepted:
+          type: boolean
+        current_stage:
+          type: integer
+          nullable: true
+          description: "Index of the first incomplete stage; null when complete or not accepted."
+        stages:
+          type: array
+          items:
+            "$ref": "#/components/schemas/PlayerQuestStage"
+        rewards:
+          "$ref": "#/components/schemas/Rewards"
+        completion_claimed:
+          type: boolean
+        claimable:
+          type: object
+          properties:
+            stages:
+              type: array
+              items:
+                type: integer
+            completion:
+              type: boolean
+          required:
+            - stages
+            - completion
+        locked_by:
+          type: object
+          properties:
+            quests:
+              type: array
+              items:
+                type: string
+            achievements:
+              type: array
+              items:
+                type: string
+          required:
+            - quests
+            - achievements
+        available_from:
+          type: string
+          format: date-time
+          nullable: true
+        available_until:
+          type: string
+          format: date-time
+          nullable: true
+        resets_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "End of the current period for daily and weekly quests."
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "When the availability window closes."
+      required:
+        - key
+        - name
+        - description
+        - chain
+        - repeat
+        - auto_accept
+        - claimable_by
+        - requires_quests
+        - requires_achievements
+        - status
+        - period_key
+        - accepted_at
+        - auto_accepted
+        - current_stage
+        - stages
+        - rewards
+        - completion_claimed
+        - claimable
+        - locked_by
+        - available_from
+        - available_until
+        - resets_at
+        - expires_at
+    QuestClaimResult:
+      type: object
+      properties:
+        key:
+          type: string
+        period_key:
+          type: string
+        claimed_by:
+          type: string
+          enum:
+            - player
+            - server
+        claimed_at:
+          type: string
+          format: date-time
+        paid:
+          type: array
+          items:
+            type: object
+            properties:
+              stage_index:
+                type: integer
+                description: "-1 is the completion reward."
+              stage_key:
+                type: string
+                nullable: true
+              rewards:
+                "$ref": "#/components/schemas/Rewards"
+            required:
+              - stage_index
+              - stage_key
+              - rewards
+        quest:
+          "$ref": "#/components/schemas/PlayerQuest"
+      required:
+        - key
+        - period_key
+        - claimed_by
+        - claimed_at
+        - paid
+        - quest
+    QuestStat:
+      type: object
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+        chain:
+          type: string
+          nullable: true
+        repeat:
+          type: string
+        accepted:
+          type: integer
+          format: int64
+          description: "Explicit acceptances, one per player and period."
+        abandoned:
+          type: integer
+          format: int64
+        completions_claimed:
+          type: integer
+          format: int64
+        stage_rewards_claimed:
+          type: integer
+          format: int64
+      required:
+        - key
+        - name
+        - chain
+        - repeat
+        - accepted
+        - abandoned
+        - completions_claimed
+        - stage_rewards_claimed
     Meta:
       type: object
       properties:
@@ -3735,6 +4636,10 @@ components:
           type: array
           items:
             "$ref": "#/components/schemas/AchievementDefinition"
+        quests:
+          type: array
+          items:
+            "$ref": "#/components/schemas/QuestDefinition"
       required:
         - items
         - currencies

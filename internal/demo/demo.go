@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
@@ -74,7 +75,7 @@ func Seed(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
-		if _, _, err = catalog.ApplyRuntimeConfig(ctx, tx, projectID, envID, versionID, cfg); err != nil {
+		if _, _, err = catalog.ApplyRuntimeConfig(ctx, tx, projectID, envID, versionID, cfg, time.Now()); err != nil {
 			return err
 		}
 	}
@@ -138,6 +139,8 @@ func Configuration() catalog.Config {
 		Stats: []catalog.StatConfig{
 			{Key: "enemies_defeated", Name: "Enemies defeated", Kind: "counter"},
 			{Key: "met_the_mentor", Name: "Met the mentor", Kind: "flag"},
+			{Key: "entered_the_mine", Name: "Entered the old mine", Kind: "flag"},
+			{Key: "returned_to_mentor", Name: "Returned to the mentor", Kind: "flag"},
 		},
 		Achievements: []catalog.AchievementConfig{
 			{Key: "first_blood", Name: "First Blood", Description: "Defeat your first enemy.",
@@ -152,6 +155,41 @@ func Configuration() catalog.Config {
 			{Key: "a_wise_word", Name: "A Wise Word", Description: "Listen to the mentor.", Hidden: true,
 				Conditions: []goals.Condition{{Type: goals.Flag, FlagKey: "met_the_mentor"}},
 				Rewards:    goals.Rewards{XP: 50}},
+		},
+		// A three-quest story chain (the first starts on its own), a daily and a
+		// weekly. "Return to the mentor" is a flag because it must happen after the
+		// fight: counted conditions only know what happened, not in which order.
+		Quests: []catalog.QuestConfig{
+			{Key: "the_awakening", Name: "The Awakening", Description: "Find the mentor.", Chain: "Main Story", AutoAccept: true,
+				Stages: []catalog.QuestStageConfig{
+					{Key: "meet", Name: "Meet the mentor", Conditions: []goals.Condition{{Type: goals.Flag, FlagKey: "met_the_mentor"}},
+						Rewards: goals.Rewards{Currencies: []goals.CurrencyReward{{CurrencyKey: "credits", Amount: 50}}}},
+				},
+				Rewards: goals.Rewards{XP: 50}},
+			{Key: "into_the_mine", Name: "Into the Mine", Description: "Clear the old mine.", Chain: "Main Story", RequiresQuests: []string{"the_awakening"},
+				Stages: []catalog.QuestStageConfig{
+					{Key: "enter", Name: "Enter the old mine", Conditions: []goals.Condition{{Type: goals.Flag, FlagKey: "entered_the_mine"}}},
+					{Key: "clear", Name: "Defeat 5 enemies", Conditions: []goals.Condition{{Type: goals.Stat, StatKey: "enemies_defeated", Target: 5}},
+						Rewards: goals.Rewards{Items: []goals.ItemReward{{ItemKey: "health_potion", Quantity: 2}}}},
+					{Key: "return", Name: "Return to the mentor", Conditions: []goals.Condition{{Type: goals.Flag, FlagKey: "returned_to_mentor"}}},
+				},
+				Rewards: goals.Rewards{Currencies: []goals.CurrencyReward{{CurrencyKey: "gems", Amount: 10}}, XP: 200}},
+			{Key: "the_mentors_trial", Name: "The Mentor's Trial", Description: "Prove yourself in battle.", Chain: "Main Story",
+				RequiresQuests: []string{"into_the_mine"}, RequiresAchievements: []string{"first_blood"},
+				Stages: []catalog.QuestStageConfig{
+					{Key: "duel", Name: "Defeat 10 enemies", Conditions: []goals.Condition{{Type: goals.Stat, StatKey: "enemies_defeated", Target: 10}}},
+				},
+				Rewards: goals.Rewards{Currencies: []goals.CurrencyReward{{CurrencyKey: "gems", Amount: 25}}}},
+			{Key: "daily_hunt", Name: "Daily Hunt", Description: "Defeat 3 enemies today.", Chain: "Repeatable", Repeat: "daily", AutoAccept: true,
+				Stages: []catalog.QuestStageConfig{
+					{Key: "hunt", Name: "Defeat 3 enemies", Conditions: []goals.Condition{{Type: goals.Stat, StatKey: "enemies_defeated", Target: 3}}},
+				},
+				Rewards: goals.Rewards{Currencies: []goals.CurrencyReward{{CurrencyKey: "credits", Amount: 25}}}},
+			{Key: "weekly_trader", Name: "Weekly Trader", Description: "Spend 200 credits this week.", Chain: "Repeatable", Repeat: "weekly",
+				Stages: []catalog.QuestStageConfig{
+					{Key: "spend", Name: "Spend 200 credits", Conditions: []goals.Condition{{Type: goals.CurrencySpent, CurrencyKey: "credits", Target: 200}}},
+				},
+				Rewards: goals.Rewards{Currencies: []goals.CurrencyReward{{CurrencyKey: "gems", Amount: 5}}}},
 		},
 	}
 }
