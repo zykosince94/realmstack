@@ -28,6 +28,20 @@ type Env struct {
 	// Now is the single clock for token expiry, refresh expiry, season checks and
 	// stored timestamps that are later compared. Tests replace it to test boundaries.
 	Now func() time.Time
+	// ReadDB is an optional read replica for reads that tolerate a little lag
+	// (leaderboard rankings, goal progress). nil means use DB. Every write, claim and
+	// accept uses DB, the primary.
+	ReadDB *pgxpool.Pool
+	// Credentials caches server-credential lookups (spec 6.6); nil disables caching.
+	Credentials *CredentialCache
+}
+
+// Reader returns the pool for lag-tolerant reads: the replica when configured.
+func (e *Env) Reader() Querier {
+	if e.ReadDB != nil {
+		return e.ReadDB
+	}
+	return e.DB
 }
 
 // Querier is satisfied by *pgxpool.Pool, *pgxpool.Conn and pgx.Tx, so read helpers

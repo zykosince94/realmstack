@@ -202,6 +202,9 @@ func (h Handler) Update(c *gin.Context) {
 		platform.Internal(c, err)
 		return
 	}
+	if status == "archived" {
+		h.Credentials.ForgetProject(c.Param("projectId")) // its server credentials stop now on this instance
+	}
 	h.Get(c)
 }
 
@@ -313,15 +316,19 @@ func (h Handler) ListCredentials(c *gin.Context) {
 
 // RevokeCredential revokes a credential of a project the caller owns.
 func (h Handler) RevokeCredential(c *gin.Context) {
-	tag, err := h.DB.Exec(c, `UPDATE server_credentials sc SET revoked_at=now() FROM projects pr WHERE sc.id=$1 AND sc.project_id=pr.id AND pr.owner_user_id=$2 AND sc.revoked_at IS NULL`,
-		c.Param("id"), platform.GetPrincipal(c).ID)
+	var prefix string
+	err := h.DB.QueryRow(c, `UPDATE server_credentials sc SET revoked_at=now() FROM projects pr WHERE sc.id=$1 AND sc.project_id=pr.id AND pr.owner_user_id=$2 AND sc.revoked_at IS NULL RETURNING sc.key_prefix`,
+		c.Param("id"), platform.GetPrincipal(c).ID).Scan(&prefix)
+	if errors.Is(err, pgx.ErrNoRows) {
+		platform.NotFound(c)
+		return
+	}
 	if err != nil {
 		platform.Internal(c, err)
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		platform.NotFound(c)
-		return
-	}
+	// Stop it working on this instance now; other instances drop it within the
+	// credential cache's TTL (at most 60 seconds).
+	h.Credentials.Forget(prefix)
 	platform.Success(c, http.StatusOK, gin.H{"revoked": true})
 }

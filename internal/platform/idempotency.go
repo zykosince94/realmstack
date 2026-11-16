@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -54,43 +55,9 @@ func (e *Env) Mutate(c *gin.Context, actor Principal, payload any, fn MutateFunc
 		return
 	}
 	defer tx.Rollback(c)
-	kind := IdempotencyKind(actor)
-	// Serialize concurrent uses of one key; the primary key is the final guard.
-	if _, err = tx.Exec(c, `SELECT pg_advisory_xact_lock(hashtext($1))`, actor.ProjectID+":"+actor.EnvironmentID+":"+kind+":"+actor.ID+":"+key); err != nil {
-		Internal(c, err)
-		return
-	}
-	body, _ := json.Marshal(gin.H{"route": c.FullPath(), "actor": actor.ID, "kind": kind, "payload": payload})
-	hash := Digest(string(body))
-	var prior string
-	var stored []byte
-	var storedStatus int
-	err = tx.QueryRow(c, `SELECT request_hash,result,status_code FROM idempotency_records WHERE project_id=$1 AND environment_id=$2 AND actor_kind=$3 AND actor_id=$4 AND key=$5`,
-		actor.ProjectID, actor.EnvironmentID, kind, actor.ID, key).Scan(&prior, &stored, &storedStatus)
-	switch {
-	case err == nil && prior != hash:
-		Fail(c, http.StatusConflict, "IDEMPOTENCY_CONFLICT", "Idempotency key was already used with a different request.")
-		return
-	case err == nil:
-		Success(c, storedStatus, json.RawMessage(stored))
-		return
-	case !errors.Is(err, pgx.ErrNoRows):
-		Internal(c, err)
-		return
-	}
-	status, result, err := fn(tx)
+	status, result, err := MutateIn(c, tx, actor, key, c.FullPath(), payload, fn)
 	if err != nil {
 		Respond(c, err)
-		return
-	}
-	b, err := json.Marshal(result)
-	if err != nil {
-		Internal(c, err)
-		return
-	}
-	if _, err = tx.Exec(c, `INSERT INTO idempotency_records(project_id,environment_id,actor_kind,actor_id,key,request_hash,result,status_code) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-		actor.ProjectID, actor.EnvironmentID, kind, actor.ID, key, hash, b, status); err != nil {
-		Internal(c, err)
 		return
 	}
 	if err = tx.Commit(c); err != nil {
@@ -98,4 +65,45 @@ func (e *Env) Mutate(c *gin.Context, actor Principal, payload any, fn MutateFunc
 		return
 	}
 	Success(c, status, result)
+}
+
+// MutateIn runs the idempotency algorithm inside an existing transaction: lock the
+// key, replay a stored result or reject a reused key with a different request (409),
+// otherwise run fn and store its result. Mutate wraps it for one request; batch writes
+// call it once per entry inside a savepoint, so every entry gets exactly the same
+// guarantees as a single call. route is part of the request hash.
+func MutateIn(ctx context.Context, tx pgx.Tx, actor Principal, key, route string, payload any, fn MutateFunc) (int, json.RawMessage, error) {
+	kind := IdempotencyKind(actor)
+	// Serialize concurrent uses of one key; the primary key is the final guard.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, actor.ProjectID+":"+actor.EnvironmentID+":"+kind+":"+actor.ID+":"+key); err != nil {
+		return 0, nil, err
+	}
+	body, _ := json.Marshal(gin.H{"route": route, "actor": actor.ID, "kind": kind, "payload": payload})
+	hash := Digest(string(body))
+	var prior string
+	var stored []byte
+	var storedStatus int
+	err := tx.QueryRow(ctx, `SELECT request_hash,result,status_code FROM idempotency_records WHERE project_id=$1 AND environment_id=$2 AND actor_kind=$3 AND actor_id=$4 AND key=$5`,
+		actor.ProjectID, actor.EnvironmentID, kind, actor.ID, key).Scan(&prior, &stored, &storedStatus)
+	switch {
+	case err == nil && prior != hash:
+		return 0, nil, &Error{Status: http.StatusConflict, Code: "IDEMPOTENCY_CONFLICT", Message: "Idempotency key was already used with a different request."}
+	case err == nil:
+		return storedStatus, stored, nil
+	case !errors.Is(err, pgx.ErrNoRows):
+		return 0, nil, err
+	}
+	status, result, err := fn(tx)
+	if err != nil {
+		return 0, nil, err
+	}
+	b, err := json.Marshal(result)
+	if err != nil {
+		return 0, nil, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO idempotency_records(project_id,environment_id,actor_kind,actor_id,key,request_hash,result,status_code) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+		actor.ProjectID, actor.EnvironmentID, kind, actor.ID, key, hash, b, status); err != nil {
+		return 0, nil, err
+	}
+	return status, b, nil
 }

@@ -9,10 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"realmstack-backend/internal/platform"
+	"realmstack-backend/internal/totals"
 )
 
 // Handler serves stat and flag routes.
@@ -56,21 +58,33 @@ func (h Handler) Increment(c *gin.Context) {
 	}
 	key := c.Param("statKey")
 	h.Mutate(c, actor, gin.H{"stat_key": key, "body": in}, func(tx pgx.Tx) (int, any, error) {
-		id, err := definition(c, tx, actor, key, "counter")
-		if err != nil {
-			return 0, nil, err
-		}
-		var value int64
-		err = tx.QueryRow(c, `INSERT INTO player_stats(player_id,project_id,environment_id,stat_definition_id,value) VALUES($1,$2,$3,$4,$5)
-			ON CONFLICT(player_id,stat_definition_id) DO UPDATE SET value=player_stats.value+EXCLUDED.value,updated_at=now() RETURNING value`,
-			actor.ID, actor.ProjectID, actor.EnvironmentID, id, in.Amount).Scan(&value)
-		if err != nil {
-			return 0, nil, err
-		}
-		_, err = tx.Exec(c, `INSERT INTO stat_transactions(player_id,project_id,environment_id,stat_definition_id,operation,amount,reason,reference,created_at) VALUES($1,$2,$3,$4,'increment',$5,$6,$7,$8)`,
-			actor.ID, actor.ProjectID, actor.EnvironmentID, id, in.Amount, in.Reason, in.Reference, h.Now())
+		value, err := IncrementTx(c, tx, actor, actor.ID, key, in.Amount, in.Reason, in.Reference, h.Now())
 		return http.StatusOK, gin.H{"stat_key": key, "incremented": in.Amount, "value": value}, err
 	})
+}
+
+// IncrementTx adds amount to a player's counter inside tx and writes the ledger row and
+// goal total. It returns the new value. Used by the route and by batch writes.
+func IncrementTx(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, key string, amount int64, reason, reference string, at time.Time) (int64, error) {
+	if amount <= 0 || amount > 1e9 {
+		return 0, platform.Errf(http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Amount must be a positive integer (counters never decrease).")
+	}
+	id, err := definition(ctx, tx, scope, key, "counter")
+	if err != nil {
+		return 0, err
+	}
+	var value int64
+	err = tx.QueryRow(ctx, `INSERT INTO player_stats(player_id,project_id,environment_id,stat_definition_id,value) VALUES($1,$2,$3,$4,$5)
+		ON CONFLICT(player_id,stat_definition_id) DO UPDATE SET value=player_stats.value+EXCLUDED.value,updated_at=now() RETURNING value`,
+		playerID, scope.ProjectID, scope.EnvironmentID, id, amount).Scan(&value)
+	if err != nil {
+		return 0, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO stat_transactions(player_id,project_id,environment_id,stat_definition_id,operation,amount,reason,reference,created_at) VALUES($1,$2,$3,$4,'increment',$5,$6,$7,$8)`,
+		playerID, scope.ProjectID, scope.EnvironmentID, id, amount, reason, reference, at); err != nil {
+		return 0, err
+	}
+	return value, totals.Add(ctx, tx, scope, playerID, at, totals.Delta{Metric: totals.Stat(key), Amount: amount})
 }
 
 // SetFlag sets a flag (trusted server only). Flags are set-only: setting an already
@@ -89,24 +103,26 @@ func (h Handler) SetFlag(c *gin.Context) {
 	}
 	key := c.Param("flagKey")
 	h.Mutate(c, actor, gin.H{"flag_key": key, "reason": in.Reason, "reference": in.Reference}, func(tx pgx.Tx) (int, any, error) {
-		id, err := definition(c, tx, actor, key, "flag")
-		if err != nil {
-			return 0, nil, err
-		}
-		tag, err := tx.Exec(c, `INSERT INTO player_stats(player_id,project_id,environment_id,stat_definition_id,value) VALUES($1,$2,$3,$4,1) ON CONFLICT(player_id,stat_definition_id) DO NOTHING`,
-			actor.ID, actor.ProjectID, actor.EnvironmentID, id)
-		if err != nil {
-			return 0, nil, err
-		}
-		newlySet := tag.RowsAffected() == 1
-		if newlySet {
-			if _, err = tx.Exec(c, `INSERT INTO stat_transactions(player_id,project_id,environment_id,stat_definition_id,operation,amount,reason,reference,created_at) VALUES($1,$2,$3,$4,'set_flag',1,$5,$6,$7)`,
-				actor.ID, actor.ProjectID, actor.EnvironmentID, id, in.Reason, in.Reference, h.Now()); err != nil {
-				return 0, nil, err
-			}
-		}
-		return http.StatusOK, gin.H{"flag_key": key, "set": true, "newly_set": newlySet}, nil
+		newlySet, err := SetFlagTx(c, tx, actor, actor.ID, key, in.Reason, in.Reference, h.Now())
+		return http.StatusOK, gin.H{"flag_key": key, "set": true, "newly_set": newlySet}, err
 	})
+}
+
+// SetFlagTx sets a player's flag inside tx. Setting an already set flag succeeds
+// without a second ledger row; it reports whether this call set it.
+func SetFlagTx(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, key, reason, reference string, at time.Time) (bool, error) {
+	id, err := definition(ctx, tx, scope, key, "flag")
+	if err != nil {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx, `INSERT INTO player_stats(player_id,project_id,environment_id,stat_definition_id,value) VALUES($1,$2,$3,$4,1) ON CONFLICT(player_id,stat_definition_id) DO NOTHING`,
+		playerID, scope.ProjectID, scope.EnvironmentID, id)
+	if err != nil || tag.RowsAffected() == 0 {
+		return false, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO stat_transactions(player_id,project_id,environment_id,stat_definition_id,operation,amount,reason,reference,created_at) VALUES($1,$2,$3,$4,'set_flag',1,$5,$6,$7)`,
+		playerID, scope.ProjectID, scope.EnvironmentID, id, reason, reference, at)
+	return err == nil, err
 }
 
 func (h Handler) list(c *gin.Context, scope platform.Principal, playerID string) {

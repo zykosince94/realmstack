@@ -210,8 +210,10 @@ func view(s *State) gin.H {
 	}
 }
 
+// log reads from the replica when one is configured; accept, abandon and claim
+// evaluate on the primary inside their transaction.
 func (h Handler) log(c *gin.Context, scope platform.Principal, playerID string) {
-	e, list, err := evaluator(c, h.DB, scope, playerID, h.Now())
+	e, list, err := evaluator(c, h.Reader(), scope, playerID, h.Now())
 	if err != nil {
 		platform.Internal(c, err)
 		return

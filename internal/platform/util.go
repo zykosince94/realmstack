@@ -80,13 +80,23 @@ var (
 	dummyHash     []byte
 )
 
+// BcryptCost is the cost for new password hashes (BCRYPT_COST; default 10). Stored
+// hashes keep the cost they were created with. Login throughput under a surge is
+// scaled by adding API instances, not by lowering this (spec 6.6).
+var BcryptCost = bcrypt.DefaultCost
+
+// HashPassword hashes a password with BcryptCost.
+func HashPassword(password string) ([]byte, error) {
+	return bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
+}
+
 // CheckPassword compares a password against a stored bcrypt hash. When the account
 // does not exist (found == false) it still runs a bcrypt comparison against a dummy
 // hash, so response timing does not reveal whether an email is registered.
 func CheckPassword(found bool, hash, password string) bool {
 	if !found {
 		dummyHashOnce.Do(func() {
-			dummyHash, _ = bcrypt.GenerateFromPassword([]byte("realmstack-timing-equaliser"), bcrypt.DefaultCost)
+			dummyHash, _ = HashPassword("realmstack-timing-equaliser")
 		})
 		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
 		return false

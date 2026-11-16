@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"realmstack-backend/internal/platform"
+	"realmstack-backend/internal/totals"
 )
 
 // Handler serves inventory routes.
@@ -69,7 +70,10 @@ func Grant(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, i
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO economy_transactions(player_id,project_id,environment_id,item_id,operation,quantity,reason,reference,source,created_at) VALUES($1,$2,$3,$4,'grant',$5,$6,$7,$8,$9)`,
 		playerID, scope.ProjectID, scope.EnvironmentID, itemID, quantity, reason, reference, source, at)
-	return after, err
+	if err != nil || source != "api" {
+		return after, err // only api rows count toward goals, so only they move the totals
+	}
+	return after, totals.Add(ctx, tx, scope, playerID, at, totals.Delta{Metric: totals.Grant(itemKey), Amount: quantity}, totals.Delta{Metric: totals.GrantAny, Amount: quantity})
 }
 
 // GrantHandler is the trusted-server grant route.
@@ -172,8 +176,12 @@ func (h Handler) Consume(c *gin.Context) {
 			}
 			unequipped = tag.RowsAffected() > 0
 		}
+		now := h.Now()
 		if _, err = tx.Exec(c, `INSERT INTO economy_transactions(player_id,project_id,environment_id,item_id,operation,quantity,reason,reference,created_at) VALUES($1,$2,$3,$4,'consume',$5,$6,$7,$8)`,
-			p.ID, p.ProjectID, p.EnvironmentID, itemID, in.Quantity, in.Reason, in.Reference, h.Now()); err != nil {
+			p.ID, p.ProjectID, p.EnvironmentID, itemID, in.Quantity, in.Reason, in.Reference, now); err != nil {
+			return 0, nil, err
+		}
+		if err = totals.Add(c, tx, p, p.ID, now, totals.Delta{Metric: totals.Consume(in.ItemKey), Amount: in.Quantity}, totals.Delta{Metric: totals.ConsumeAny, Amount: in.Quantity}); err != nil {
 			return 0, nil, err
 		}
 		return http.StatusOK, gin.H{"item_key": in.ItemKey, "consumed": in.Quantity, "remaining": after, "unequipped": unequipped}, nil

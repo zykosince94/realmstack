@@ -149,18 +149,21 @@ func view(d Definition, progress []goals.Progress, cl *claim, mask bool) gin.H {
 	return out
 }
 
+// list reads from the replica when one is configured: progress a moment stale is
+// acceptable for display. Claims evaluate on the primary, inside their transaction.
 func (h Handler) list(c *gin.Context, scope platform.Principal, playerID string, mask bool) {
-	defs, err := Definitions(c, h.DB, scope)
+	db := h.Reader()
+	defs, err := Definitions(c, db, scope)
 	if err != nil {
 		platform.Internal(c, err)
 		return
 	}
-	facts, err := goals.LoadFacts(c, h.DB, scope, playerID, goals.Window{})
+	facts, err := goals.LoadFacts(c, db, scope, playerID, goals.Window{})
 	if err != nil {
 		platform.Internal(c, err)
 		return
 	}
-	claimed, err := claims(c, h.DB, playerID)
+	claimed, err := claims(c, db, playerID)
 	if err != nil {
 		platform.Internal(c, err)
 		return

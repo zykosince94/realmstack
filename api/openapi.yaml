@@ -4,7 +4,7 @@
 openapi: "3.0.3"
 info:
   title: "RealmStack API"
-  version: "0.7.0"
+  version: "0.8.0"
   description: "Multi-tenant game backend. Every response uses {data, meta}; every error uses {error:{code,message,details}, meta}. Mutations require an Idempotency-Key: a replay returns the stored result and status, a different request with the same key returns 409. This document is the API contract: the frontend generates its client from it, and a backend test fails if a route is missing here."
 servers:
   - url: "http://localhost:8080"
@@ -4266,6 +4266,43 @@ paths:
           "$ref": "#/components/responses/E404"
         "422":
           "$ref": "#/components/responses/E422"
+  "/v1/server/batch":
+    post:
+      operationId: postServerBatch
+      tags:
+        - economy
+      summary: "Apply many trusted writes in one request (grant, credit, xp, stat, flag) across players in the credential's environment. Each entry has its own idempotency_key and runs in its own savepoint: a failing entry is reported and does not roll back the others; entries apply in request order. The response is 200 with a result per entry. 422 BATCH_SIZE above the project's max_batch_entries (default 500); 429 QUOTA_EXCEEDED counts every entry as a write."
+      security:
+        - serverCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/BatchRequest"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/BatchResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "422":
+          "$ref": "#/components/responses/E422"
+        "429":
+          "$ref": "#/components/responses/E429"
 components:
   securitySchemes:
     userBearer:
@@ -4352,6 +4389,106 @@ components:
           schema:
             "$ref": "#/components/schemas/ErrorResponse"
   schemas:
+    BatchEntry:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - grant
+            - credit
+            - xp
+            - stat
+            - flag
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 200
+        player_id:
+          type: string
+          format: uuid
+        item_key:
+          type: string
+          description: "grant"
+        quantity:
+          type: integer
+          format: int64
+          description: "grant"
+        currency_key:
+          type: string
+          description: "credit"
+        amount:
+          type: integer
+          format: int64
+          description: "credit, xp, stat"
+        stat_key:
+          type: string
+          description: "stat"
+        flag_key:
+          type: string
+          description: "flag"
+        reason:
+          type: string
+        reference:
+          type: string
+      required:
+        - type
+        - idempotency_key
+        - player_id
+    BatchRequest:
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            "$ref": "#/components/schemas/BatchEntry"
+      required:
+        - entries
+    BatchEntryResult:
+      type: object
+      properties:
+        index:
+          type: integer
+        idempotency_key:
+          type: string
+        type:
+          type: string
+        status:
+          type: integer
+          description: "The HTTP status the same write would have returned on its own."
+        data:
+          type: object
+          additionalProperties: true
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+          required:
+            - code
+            - message
+      required:
+        - index
+        - idempotency_key
+        - type
+        - status
+    BatchResult:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            "$ref": "#/components/schemas/BatchEntryResult"
+        applied:
+          type: integer
+        failed:
+          type: integer
+      required:
+        - results
+        - applied
+        - failed
     AISettings:
       type: object
       properties:

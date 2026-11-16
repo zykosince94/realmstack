@@ -1,11 +1,19 @@
-// Package leaderboards records score submissions and computes deterministic rankings
+// Package leaderboards records score submissions and serves deterministic rankings
 // from PostgreSQL: best score per player, earliest best breaks ties, seasons are
 // start-inclusive and end-exclusive.
+//
+// Since Phase 8 rankings read leaderboard_best_scores, a per-player best maintained in
+// the submission transaction, instead of recomputing best scores from every
+// submission on each read. Top-N is an index scan and a player's rank is one indexed
+// count of better entries (spec 6.6). RebuildBestScores recomputes the table from the
+// submissions, which remain the source of truth.
 package leaderboards
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -18,7 +26,17 @@ import (
 // Handler serves leaderboard routes.
 type Handler struct{ *platform.Env }
 
-// Submit records a player's score.
+// rankScore orders entries so that smaller is always better: the score itself on
+// lower-is-better boards, its negation on higher-is-better ones. One ascending index
+// then serves both directions.
+func rankScore(direction string, score int64) int64 {
+	if direction == "higher" {
+		return -score
+	}
+	return score
+}
+
+// Submit records a player's score and updates their best in the same transaction.
 func (h Handler) Submit(c *gin.Context) {
 	var in struct {
 		Score int64 `json:"score"`
@@ -26,13 +44,17 @@ func (h Handler) Submit(c *gin.Context) {
 	if !platform.Bind(c, &in) {
 		return
 	}
+	if in.Score == math.MinInt64 {
+		platform.Fail(c, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "The score is out of range.")
+		return
+	}
 	p := platform.GetPrincipal(c)
 	key := c.Param("key")
 	h.Mutate(c, p, gin.H{"key": key, "score": in.Score}, func(tx pgx.Tx) (int, any, error) {
-		var id string
+		var id, direction string
 		var start, end *time.Time
-		err := tx.QueryRow(c, `SELECT id::text,season_start,season_end FROM leaderboard_definitions WHERE project_id=$1 AND environment_id=$2 AND key=$3 AND active`,
-			p.ProjectID, p.EnvironmentID, key).Scan(&id, &start, &end)
+		err := tx.QueryRow(c, `SELECT id::text,score_direction,season_start,season_end FROM leaderboard_definitions WHERE project_id=$1 AND environment_id=$2 AND key=$3 AND active`,
+			p.ProjectID, p.EnvironmentID, key).Scan(&id, &direction, &start, &end)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, nil, platform.Errf(http.StatusNotFound, "NOT_FOUND", "The leaderboard was not found.")
 		}
@@ -45,27 +67,31 @@ func (h Handler) Submit(c *gin.Context) {
 		if start != nil && now.Before(*start) || end != nil && !now.Before(*end) {
 			return 0, nil, platform.Errf(http.StatusUnprocessableEntity, "LEADERBOARD_CLOSED", "The leaderboard is not accepting scores.")
 		}
-		_, err = tx.Exec(c, `INSERT INTO score_submissions(leaderboard_id,player_id,project_id,environment_id,score,idempotency_key,request_hash,submitted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-			id, p.ID, p.ProjectID, p.EnvironmentID, in.Score, platform.IdempotencyKey(c), platform.Digest(fmt.Sprint(id, in.Score)), now)
+		var submissionID string
+		if err = tx.QueryRow(c, `INSERT INTO score_submissions(leaderboard_id,player_id,project_id,environment_id,score,idempotency_key,request_hash,submitted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id::text`,
+			id, p.ID, p.ProjectID, p.EnvironmentID, in.Score, platform.IdempotencyKey(c), platform.Digest(fmt.Sprint(id, in.Score)), now).Scan(&submissionID); err != nil {
+			return 0, nil, err
+		}
+		// Replace the best only with a strictly better entry, in exactly the order the
+		// rebuild uses (score, then earlier time, then smaller submission id), so the
+		// maintained table and a rebuild from submissions always agree.
+		_, err = tx.Exec(c, `INSERT INTO leaderboard_best_scores(leaderboard_id,player_id,project_id,environment_id,best_score,rank_score,achieved_at,submission_id)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+			ON CONFLICT (leaderboard_id,player_id) DO UPDATE SET best_score=EXCLUDED.best_score,rank_score=EXCLUDED.rank_score,achieved_at=EXCLUDED.achieved_at,submission_id=EXCLUDED.submission_id
+			WHERE (EXCLUDED.rank_score,EXCLUDED.achieved_at,EXCLUDED.submission_id) < (leaderboard_best_scores.rank_score,leaderboard_best_scores.achieved_at,leaderboard_best_scores.submission_id)`,
+			id, p.ID, p.ProjectID, p.EnvironmentID, in.Score, rankScore(direction, in.Score), now, submissionID)
 		return http.StatusCreated, gin.H{"leaderboard_key": key, "score": in.Score, "submitted_at": now}, err
 	})
 }
 
-// bestScores ranks one best submission per player inside the board's season.
-// order is "DESC" or "ASC" from a fixed allowlist, never user input.
-const bestScores = `WITH best AS (
-	SELECT DISTINCT ON (ss.player_id) ss.player_id,ss.score,ss.submitted_at FROM score_submissions ss
-	WHERE ss.leaderboard_id=$1 AND ($2::timestamptz IS NULL OR ss.submitted_at >= $2) AND ($3::timestamptz IS NULL OR ss.submitted_at < $3)
-	ORDER BY ss.player_id,ss.score %[1]s,ss.submitted_at ASC,ss.id ASC),
-ranked AS (SELECT player_id,score,submitted_at,ROW_NUMBER() OVER(ORDER BY score %[1]s,submitted_at ASC,player_id ASC) AS rank FROM best)`
-
-// Get returns the top entries and, for a player token, that player's rank.
+// Get returns the top entries and, for a player token, that player's rank. Reads go
+// to the replica when one is configured: a ranking a moment stale is acceptable.
 func (h Handler) Get(c *gin.Context) {
 	scope := platform.GetScope(c)
-	var boardID, direction string
-	var start, end *time.Time
-	err := h.DB.QueryRow(c, `SELECT id::text,score_direction,season_start,season_end FROM leaderboard_definitions WHERE project_id=$1 AND environment_id=$2 AND key=$3 AND active`,
-		scope.ProjectID, scope.EnvironmentID, c.Param("key")).Scan(&boardID, &direction, &start, &end)
+	db := h.Reader()
+	var boardID string
+	err := db.QueryRow(c, `SELECT id::text FROM leaderboard_definitions WHERE project_id=$1 AND environment_id=$2 AND key=$3 AND active`,
+		scope.ProjectID, scope.EnvironmentID, c.Param("key")).Scan(&boardID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		platform.NotFound(c)
 		return
@@ -78,22 +104,19 @@ func (h Handler) Get(c *gin.Context) {
 	if n, e := strconv.Atoi(c.DefaultQuery("limit", "10")); e == nil && n > 0 {
 		limit = min(n, 100)
 	}
-	order := "DESC"
-	if direction == "lower" {
-		order = "ASC"
-	}
-	rows, err := h.DB.Query(c, fmt.Sprintf(bestScores, order)+` SELECT r.player_id::text,r.score,r.submitted_at,pl.display_name,r.rank FROM ranked r JOIN players pl ON pl.id=r.player_id ORDER BY r.rank LIMIT $4`,
-		boardID, start, end, limit)
+	// Top-N: an index scan on (leaderboard_id, rank_score, achieved_at, player_id).
+	rows, err := db.Query(c, `SELECT b.player_id::text,b.best_score,b.achieved_at,pl.display_name FROM leaderboard_best_scores b JOIN players pl ON pl.id=b.player_id
+		WHERE b.leaderboard_id=$1 ORDER BY b.rank_score,b.achieved_at,b.player_id LIMIT $2`, boardID, limit)
 	if err != nil {
 		platform.Internal(c, err)
 		return
 	}
 	entries := []gin.H{}
-	for rows.Next() {
+	for rank := int64(1); rows.Next(); rank++ {
 		var id, name string
-		var score, rank int64
+		var score int64
 		var at time.Time
-		if err = rows.Scan(&id, &score, &at, &name, &rank); err != nil {
+		if err = rows.Scan(&id, &score, &at, &name); err != nil {
 			rows.Close()
 			platform.Internal(c, err)
 			return
@@ -107,15 +130,67 @@ func (h Handler) Get(c *gin.Context) {
 	}
 	result := gin.H{"key": c.Param("key"), "entries": entries}
 	if platform.HasPrincipal(c) {
-		var rank, score int64
-		err = h.DB.QueryRow(c, fmt.Sprintf(bestScores, order)+` SELECT rank,score FROM ranked WHERE player_id=$4`, boardID, start, end, platform.GetPrincipal(c).ID).Scan(&rank, &score)
-		switch {
-		case err == nil:
-			result["player_rank"], result["player_score"] = rank, score
-		case !errors.Is(err, pgx.ErrNoRows):
+		rank, score, found, err := PlayerRank(c, db, boardID, platform.GetPrincipal(c).ID)
+		if err != nil {
 			platform.Internal(c, err)
 			return
 		}
+		if found {
+			result["player_rank"], result["player_score"] = rank, score
+		}
 	}
 	platform.Success(c, http.StatusOK, result)
+}
+
+// PlayerRank is one indexed count of the entries that rank ahead of the player: the
+// row comparison matches the index order, so PostgreSQL reads only that index range.
+func PlayerRank(ctx context.Context, q platform.Querier, boardID, playerID string) (rank, score int64, found bool, err error) {
+	err = q.QueryRow(ctx, `SELECT b.best_score,1+(SELECT count(*) FROM leaderboard_best_scores o WHERE o.leaderboard_id=b.leaderboard_id
+		AND (o.rank_score,o.achieved_at,o.player_id) < (b.rank_score,b.achieved_at,b.player_id))
+		FROM leaderboard_best_scores b WHERE b.leaderboard_id=$1 AND b.player_id=$2`, boardID, playerID).Scan(&score, &rank)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, 0, false, nil
+	}
+	return rank, score, err == nil, err
+}
+
+// RebuildBestScores recomputes leaderboard_best_scores from score_submissions with
+// the same ordering the submit path uses. Submissions are locked against writes (reads
+// continue) for the duration, so nothing can land between the delete and the insert.
+func RebuildBestScores(ctx context.Context, db interface {
+	Begin(context.Context) (pgx.Tx, error)
+}) (int64, error) {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `LOCK TABLE score_submissions IN SHARE MODE`); err != nil {
+		return 0, err
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM leaderboard_best_scores`); err != nil {
+		return 0, err
+	}
+	tag, err := tx.Exec(ctx, `INSERT INTO leaderboard_best_scores(leaderboard_id,player_id,project_id,environment_id,best_score,rank_score,achieved_at,submission_id) `+recomputeBest)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), tx.Commit(ctx)
+}
+
+// recomputeBest derives every player's best entry from the submissions, in the order
+// the submit path uses: rank_score, then earliest time, then smallest submission id.
+const recomputeBest = `SELECT DISTINCT ON (s.leaderboard_id,s.player_id) s.leaderboard_id,s.player_id,s.project_id,s.environment_id,s.score AS best_score,
+	CASE WHEN d.score_direction='higher' THEN -s.score ELSE s.score END AS rank_score,s.submitted_at AS achieved_at,s.id AS submission_id
+FROM score_submissions s JOIN leaderboard_definitions d ON d.id=s.leaderboard_id
+ORDER BY s.leaderboard_id,s.player_id,CASE WHEN d.score_direction='higher' THEN -s.score ELSE s.score END,s.submitted_at,s.id`
+
+// VerifyBestScores counts best-score rows that differ from a recomputation from the
+// submissions, without changing anything. Zero means a rebuild would change nothing.
+func VerifyBestScores(ctx context.Context, q platform.Querier) (int64, error) {
+	var n int64
+	err := q.QueryRow(ctx, `SELECT count(*) FROM leaderboard_best_scores b FULL OUTER JOIN (`+recomputeBest+`) r
+		ON r.leaderboard_id=b.leaderboard_id AND r.player_id=b.player_id
+		WHERE b.player_id IS NULL OR r.player_id IS NULL OR (r.best_score,r.rank_score,r.achieved_at,r.submission_id)<>(b.best_score,b.rank_score,b.achieved_at,b.submission_id)`).Scan(&n)
+	return n, err
 }

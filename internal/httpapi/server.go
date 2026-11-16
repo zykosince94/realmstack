@@ -4,6 +4,7 @@
 package httpapi
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"realmstack-backend/internal/ai"
+	"realmstack-backend/internal/limits"
 	"realmstack-backend/internal/platform"
 	"realmstack-backend/internal/players"
 )
@@ -36,12 +38,23 @@ type Config struct {
 	AuthRateLimit int
 	// AI configures the optional AI assistant; an empty encryption key disables it.
 	AI ai.Config
+	// Quotas are the per-tenant defaults for projects without a project_quotas row.
+	// Zero fields use DefaultQuotas.
+	Quotas limits.Limits
+	// CredentialCacheTTL caches successful server-credential lookups (capped at 60 s;
+	// 0 uses 30 s, negative disables).
+	CredentialCacheTTL time.Duration
 }
+
+// DefaultQuotas leave headroom above the spec's target tenant (about 5,000 writes and
+// a similar number of reads per second).
+var DefaultQuotas = limits.Limits{RequestsPerMinute: 1_200_000, WritesPerMinute: 600_000, MaxBatchEntries: 500}
 
 // Server owns the Gin engine and the shared Env.
 type Server struct {
 	Env     *platform.Env
 	AI      *ai.Service
+	Quotas  *limits.Quotas // nil without a database (unit tests)
 	cfg     Config
 	router  *gin.Engine
 	limiter *rateLimiter
@@ -55,6 +68,18 @@ func New(db *pgxpool.Pool, cfg Config, logger *slog.Logger) *Server {
 	if cfg.AuthRateLimit <= 0 {
 		cfg.AuthRateLimit = 30
 	}
+	if cfg.Quotas.RequestsPerMinute <= 0 {
+		cfg.Quotas.RequestsPerMinute = DefaultQuotas.RequestsPerMinute
+	}
+	if cfg.Quotas.WritesPerMinute <= 0 {
+		cfg.Quotas.WritesPerMinute = DefaultQuotas.WritesPerMinute
+	}
+	if cfg.Quotas.MaxBatchEntries <= 0 {
+		cfg.Quotas.MaxBatchEntries = DefaultQuotas.MaxBatchEntries
+	}
+	if cfg.CredentialCacheTTL == 0 {
+		cfg.CredentialCacheTTL = 30 * time.Second
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -64,6 +89,11 @@ func New(db *pgxpool.Pool, cfg Config, logger *slog.Logger) *Server {
 		cfg:     cfg,
 		router:  gin.New(),
 		limiter: newRateLimiter(cfg.AuthRateLimit, time.Minute),
+	}
+	clock := func() time.Time { return s.Env.Now() } // follows tests that replace Env.Now
+	s.Env.Credentials = platform.NewCredentialCache(cfg.CredentialCacheTTL, clock)
+	if db != nil {
+		s.Quotas = limits.NewQuotas(db, cfg.Quotas, clock)
 	}
 	assistant, err := ai.NewService(s.Env, cfg.AI)
 	if err != nil {
@@ -84,6 +114,14 @@ func New(db *pgxpool.Pool, cfg Config, logger *slog.Logger) *Server {
 		platform.Fail(c, http.StatusNotFound, "NOT_FOUND", "The requested route was not found.")
 	})
 	return s
+}
+
+// Start runs the server's background work until ctx ends: syncing quota counters
+// across instances every 250 ms.
+func (s *Server) Start(ctx context.Context) {
+	if s.Quotas != nil {
+		go s.Quotas.Run(ctx, 250*time.Millisecond, func(err error) { s.Env.Log.Error("quota sync failed", "error", err) })
+	}
 }
 
 // Handler exposes the HTTP handler, mainly for tests.
@@ -197,13 +235,25 @@ func (s *Server) serverAuth() gin.HandlerFunc {
 			return
 		}
 		p := platform.Principal{ID: prefix, Kind: platform.KindServer}
-		var hash string
-		err := s.Env.DB.QueryRow(c, `SELECT sc.project_id::text,sc.environment_id::text,sc.secret_hash FROM server_credentials sc JOIN projects pr ON pr.id=sc.project_id
-			WHERE sc.key_prefix=$1 AND sc.revoked_at IS NULL AND pr.status='active'`, prefix).Scan(&p.ProjectID, &p.EnvironmentID, &hash)
-		if err != nil || !platform.SecureHash(hash, secret) {
+		// A cached lookup skips the query, never the secret check: the digest is
+		// compared on every request.
+		cached, ok := s.Env.Credentials.Get(prefix)
+		if !ok {
+			err := s.Env.DB.QueryRow(c, `SELECT sc.project_id::text,sc.environment_id::text,sc.secret_hash FROM server_credentials sc JOIN projects pr ON pr.id=sc.project_id
+				WHERE sc.key_prefix=$1 AND sc.revoked_at IS NULL AND pr.status='active'`, prefix).Scan(&cached.ProjectID, &cached.EnvironmentID, &cached.SecretHash)
+			if err != nil {
+				platform.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "The server credential is invalid.")
+				return
+			}
+		}
+		if !platform.SecureHash(cached.SecretHash, secret) {
 			platform.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "The server credential is invalid.")
 			return
 		}
+		if !ok {
+			s.Env.Credentials.Put(prefix, cached) // only lookups whose secret matched are cached
+		}
+		p.ProjectID, p.EnvironmentID = cached.ProjectID, cached.EnvironmentID
 		platform.SetPrincipal(c, p)
 		c.Next()
 	}

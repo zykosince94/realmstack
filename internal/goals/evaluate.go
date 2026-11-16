@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -48,10 +49,18 @@ func windowSQL(column string) string {
 	return ` AND ($4::timestamptz IS NULL OR ` + column + ` >= $4) AND ($5::timestamptz IS NULL OR ` + column + ` < $5)`
 }
 
-// LoadFacts reads every total a player's goals can depend on, in six grouped queries.
-// It is the single data-access function for goal progress (Phase 8 will back the
-// all-time case with a totals table without changing callers). It only reads.
+// LoadFacts reads every total a player's goals can depend on. It is the single
+// data-access function for goal progress, so how totals are stored can change without
+// touching callers (spec 6.6). It only reads.
+//
+// An all-time window (achievements) reads the maintained totals: player_goal_totals and
+// leaderboard_best_scores, a handful of indexed rows however long the player's
+// history. A bounded window (quests) still sums the ledgers inside the window, which
+// the composite (player_id, created_at) indexes keep proportional to the window.
 func LoadFacts(ctx context.Context, q platform.Querier, scope platform.Principal, playerID string, w Window) (*Facts, error) {
+	if w.From == nil && w.Until == nil {
+		return loadAllTime(ctx, q, scope, playerID)
+	}
 	f := NewFacts()
 	args := []any{playerID, scope.ProjectID, scope.EnvironmentID, w.From, w.Until}
 
@@ -90,19 +99,7 @@ func LoadFacts(ctx context.Context, q platform.Querier, scope platform.Principal
 		return nil, err
 	}
 
-	// level_reached is a state condition: it ignores the window. It uses all-time api
-	// XP on the player's pinned curve, so XP paid by claims cannot complete it either.
-	var apiXP int64
-	var raw []byte
-	err = q.QueryRow(ctx, `SELECT COALESCE((SELECT SUM(amount) FROM xp_transactions WHERE player_id=$1 AND source='api'),0)::bigint,pv.thresholds
-		FROM player_progression pp JOIN progression_versions pv ON pv.id=pp.progression_version_id WHERE pp.player_id=$1 AND pp.project_id=$2 AND pp.environment_id=$3`,
-		playerID, scope.ProjectID, scope.EnvironmentID).Scan(&apiXP, &raw)
-	switch {
-	case err == nil:
-		var thresholds []int64
-		_ = json.Unmarshal(raw, &thresholds)
-		f.Level = progression.LevelFor(thresholds, apiXP)
-	case !errors.Is(err, pgx.ErrNoRows):
+	if f.Level, err = loadLevel(ctx, q, scope, playerID); err != nil {
 		return nil, err
 	}
 
@@ -125,21 +122,7 @@ func LoadFacts(ctx context.Context, q platform.Querier, scope platform.Principal
 		return nil, err
 	}
 
-	rows, err = q.Query(ctx, `SELECT d.key FROM player_stats ps JOIN stat_definitions d ON d.id=ps.stat_definition_id
-		WHERE ps.player_id=$1 AND ps.project_id=$2 AND ps.environment_id=$3 AND d.kind='flag' AND ps.value>0`, playerID, scope.ProjectID, scope.EnvironmentID)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var key string
-		if err = rows.Scan(&key); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		f.Flags[key] = true
-	}
-	rows.Close()
-	if err = rows.Err(); err != nil {
+	if err = loadFlags(ctx, q, scope, playerID, f); err != nil {
 		return nil, err
 	}
 
@@ -161,6 +144,105 @@ func LoadFacts(ctx context.Context, q platform.Querier, scope platform.Principal
 		f.Scores[key] = s
 	}
 	rows.Close()
+	return f, rows.Err()
+}
+
+// loadLevel is level_reached's input, a state condition that ignores any window: the
+// all-time api XP total on the player's pinned curve, so XP paid by claims cannot
+// complete it either.
+func loadLevel(ctx context.Context, q platform.Querier, scope platform.Principal, playerID string) (int, error) {
+	var apiXP int64
+	var raw []byte
+	err := q.QueryRow(ctx, `SELECT COALESCE((SELECT total FROM player_goal_totals WHERE player_id=$1 AND metric='xp'),0)::bigint,pv.thresholds
+		FROM player_progression pp JOIN progression_versions pv ON pv.id=pp.progression_version_id WHERE pp.player_id=$1 AND pp.project_id=$2 AND pp.environment_id=$3`,
+		playerID, scope.ProjectID, scope.EnvironmentID).Scan(&apiXP, &raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 1, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var thresholds []int64
+	_ = json.Unmarshal(raw, &thresholds)
+	return progression.LevelFor(thresholds, apiXP), nil
+}
+
+// loadFlags reads the player's set flags (state: flags ignore any window).
+func loadFlags(ctx context.Context, q platform.Querier, scope platform.Principal, playerID string, f *Facts) error {
+	rows, err := q.Query(ctx, `SELECT d.key FROM player_stats ps JOIN stat_definitions d ON d.id=ps.stat_definition_id
+		WHERE ps.player_id=$1 AND ps.project_id=$2 AND ps.environment_id=$3 AND d.kind='flag' AND ps.value>0`, playerID, scope.ProjectID, scope.EnvironmentID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if err = rows.Scan(&key); err != nil {
+			return err
+		}
+		f.Flags[key] = true
+	}
+	return rows.Err()
+}
+
+// loadAllTime builds all-time facts from the maintained totals (three indexed reads).
+func loadAllTime(ctx context.Context, q platform.Querier, scope platform.Principal, playerID string) (*Facts, error) {
+	f := NewFacts()
+	rows, err := q.Query(ctx, `SELECT metric,total FROM player_goal_totals WHERE player_id=$1 AND project_id=$2 AND environment_id=$3`, playerID, scope.ProjectID, scope.EnvironmentID)
+	if err != nil {
+		return nil, err
+	}
+	var apiXP int64
+	for rows.Next() {
+		var metric string
+		var total int64
+		if err = rows.Scan(&metric, &total); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		kind, key, _ := strings.Cut(metric, ":")
+		switch kind {
+		case "grant":
+			f.ItemGranted[key] = total // "grant:" (empty key) is the any-item total
+		case "consume":
+			f.ItemConsumed[key] = total
+		case "credit":
+			f.CurrencyEarned[key] = total
+		case "spend":
+			f.CurrencySpent[key] = total
+		case "stat":
+			f.Stats[key] = total
+		case "xp":
+			apiXP = total
+		}
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	f.XP = apiXP
+	if f.Level, err = loadLevel(ctx, q, scope, playerID); err != nil {
+		return nil, err
+	}
+	if err = loadFlags(ctx, q, scope, playerID, f); err != nil {
+		return nil, err
+	}
+	// Best scores are maintained per board in the submission transaction; a board's
+	// season bounds which scores were accepted in the first place.
+	rows, err = q.Query(ctx, `SELECT d.key,d.score_direction,b.best_score FROM leaderboard_best_scores b JOIN leaderboard_definitions d ON d.id=b.leaderboard_id
+		WHERE b.player_id=$1 AND b.project_id=$2 AND b.environment_id=$3`, playerID, scope.ProjectID, scope.EnvironmentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var s Score
+		if err = rows.Scan(&key, &s.Direction, &s.Best); err != nil {
+			return nil, err
+		}
+		f.Scores[key] = s
+	}
 	return f, rows.Err()
 }
 

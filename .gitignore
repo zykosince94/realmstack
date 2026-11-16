@@ -6,3 +6,6 @@ coverage.out
 coverage.html
 bin/
 dist/
+# Load-test seed output (holds a generated server credential) and raw k6 results.
+loadtest/data/
+loadtest/results/

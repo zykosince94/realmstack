@@ -11,7 +11,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
-	"golang.org/x/crypto/bcrypt"
 	"realmstack-backend/internal/platform"
 )
 
@@ -93,7 +92,7 @@ func (h Handler) Register(c *gin.Context) {
 		platform.Fail(c, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Display name is too long.")
 		return
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
+	hash, err := platform.HashPassword(in.Password)
 	if err != nil {
 		platform.Internal(c, err)
 		return

@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"realmstack-backend/internal/achievements"
 	"realmstack-backend/internal/auth"
+	"realmstack-backend/internal/batch"
 	"realmstack-backend/internal/catalog"
 	"realmstack-backend/internal/economy"
 	"realmstack-backend/internal/inventory"
@@ -33,6 +34,7 @@ func (s *Server) routes() {
 	statsH := stats.Handler{Env: env}
 	achievementsH := achievements.Handler{Env: env}
 	questsH := quests.Handler{Env: env}
+	batchH := batch.Handler{Env: env, Quotas: s.Quotas}
 
 	r := s.router
 	r.GET("/healthz", func(c *gin.Context) { platform.Success(c, http.StatusOK, gin.H{"status": "ok"}) })
@@ -96,7 +98,7 @@ func (s *Server) routes() {
 	v.POST("/players/refresh", playersH.Refresh)
 
 	// Player self-service (player token; scope comes from the token).
-	me := v.Group("/players/me", s.playerAuth())
+	me := v.Group("/players/me", s.playerAuth(), s.quota())
 	me.GET("", playersH.Me)
 	me.PATCH("", playersH.PatchMe)
 	me.GET("/inventory", inventoryH.List)
@@ -117,7 +119,9 @@ func (s *Server) routes() {
 	me.POST("/quests/:key/claim", questsH.ClaimMine)
 
 	// Trusted game server (server credential; scope comes from the credential).
-	server := v.Group("/server/players/:playerId", s.serverAuth())
+	// Many trusted writes in one request; each entry is idempotent on its own.
+	v.POST("/server/batch", s.serverAuth(), s.quota(), batchH.Write)
+	server := v.Group("/server/players/:playerId", s.serverAuth(), s.quota())
 	server.POST("/items/grant", inventoryH.GrantHandler)
 	server.POST("/currency/credit", economyH.CreditHandler)
 	server.POST("/xp/award", progressionH.AwardHandler)
@@ -131,6 +135,6 @@ func (s *Server) routes() {
 	server.POST("/quests/:key/claim", questsH.ClaimForPlayer)
 
 	// Leaderboards.
-	v.POST("/leaderboards/:key/scores", s.playerAuth(), leaderboardsH.Submit)
-	v.GET("/leaderboards/:key", s.publicScope(), leaderboardsH.Get)
+	v.POST("/leaderboards/:key/scores", s.playerAuth(), s.quota(), leaderboardsH.Submit)
+	v.GET("/leaderboards/:key", s.publicScope(), s.quota(), leaderboardsH.Get)
 }

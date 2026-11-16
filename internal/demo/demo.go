@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/crypto/bcrypt"
 	"realmstack-backend/internal/catalog"
 	"realmstack-backend/internal/goals"
 	"realmstack-backend/internal/platform"
@@ -29,11 +28,11 @@ const (
 // Seed creates or refreshes the demo accounts, project and published catalog. It is
 // idempotent: it never overwrites the draft and grants starter items/currency once.
 func Seed(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error {
-	adminHash, err := bcrypt.GenerateFromPassword([]byte(DemoAdminPassword), bcrypt.DefaultCost)
+	adminHash, err := platform.HashPassword(DemoAdminPassword)
 	if err != nil {
 		return err
 	}
-	playerHash, err := bcrypt.GenerateFromPassword([]byte(DemoPlayerPassword), bcrypt.DefaultCost)
+	playerHash, err := platform.HashPassword(DemoPlayerPassword)
 	if err != nil {
 		return err
 	}
@@ -92,23 +91,30 @@ func Seed(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	// Starting inventory and balance are granted once, each with a matching ledger row,
-	// so the demo player's balances always reconcile with economy_transactions.
+	// Starting inventory and balance are granted once, each with a matching ledger row
+	// and goal total, so the demo player's balances always reconcile with
+	// economy_transactions and player_goal_totals matches a rebuild.
 	_, err = tx.Exec(ctx, `WITH granted AS (
 		INSERT INTO inventory(player_id,project_id,environment_id,item_id,quantity)
 		SELECT $1,$2,$3,id,1 FROM item_definitions WHERE project_id=$2 AND environment_id=$3 AND item_key='health_potion'
-		ON CONFLICT(player_id,item_id) DO NOTHING RETURNING item_id)
-	INSERT INTO economy_transactions(player_id,project_id,environment_id,item_id,operation,quantity,reason,reference)
-	SELECT $1,$2,$3,item_id,'grant',1,'demo_seed','seed' FROM granted`, playerID, projectID, envID)
+		ON CONFLICT(player_id,item_id) DO NOTHING RETURNING item_id),
+	ledger AS (INSERT INTO economy_transactions(player_id,project_id,environment_id,item_id,operation,quantity,reason,reference)
+		SELECT $1,$2,$3,item_id,'grant',1,'demo_seed','seed' FROM granted RETURNING 1)
+	INSERT INTO player_goal_totals(player_id,project_id,environment_id,metric,total)
+	SELECT $1,$2,$3,m,1 FROM ledger, unnest(ARRAY['grant:','grant:health_potion']) AS m
+	ON CONFLICT(player_id,metric) DO UPDATE SET total=player_goal_totals.total+EXCLUDED.total`, playerID, projectID, envID)
 	if err != nil {
 		return err
 	}
 	_, err = tx.Exec(ctx, `WITH credited AS (
 		INSERT INTO balances(player_id,project_id,environment_id,currency_id,amount)
 		SELECT $1,$2,$3,id,5000 FROM currency_definitions WHERE project_id=$2 AND environment_id=$3 AND currency_key='credits'
-		ON CONFLICT(player_id,currency_id) DO NOTHING RETURNING currency_id)
-	INSERT INTO economy_transactions(player_id,project_id,environment_id,currency_id,operation,quantity,balance_after,reason,reference)
-	SELECT $1,$2,$3,currency_id,'credit',5000,5000,'demo_seed','seed' FROM credited`, playerID, projectID, envID)
+		ON CONFLICT(player_id,currency_id) DO NOTHING RETURNING currency_id),
+	ledger AS (INSERT INTO economy_transactions(player_id,project_id,environment_id,currency_id,operation,quantity,balance_after,reason,reference)
+		SELECT $1,$2,$3,currency_id,'credit',5000,5000,'demo_seed','seed' FROM credited RETURNING 1)
+	INSERT INTO player_goal_totals(player_id,project_id,environment_id,metric,total)
+	SELECT $1,$2,$3,'credit:credits',5000 FROM ledger
+	ON CONFLICT(player_id,metric) DO UPDATE SET total=player_goal_totals.total+EXCLUDED.total`, playerID, projectID, envID)
 	if err != nil {
 		return err
 	}

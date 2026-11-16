@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"realmstack-backend/internal/platform"
+	"realmstack-backend/internal/totals"
 )
 
 // Handler serves currency routes.
@@ -67,7 +68,10 @@ func Credit(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, 
 	if err != nil {
 		return 0, err
 	}
-	return after, insertLedger(ctx, tx, scope, playerID, id, "credit", amount, after, source, reason, reference, at)
+	if err = insertLedger(ctx, tx, scope, playerID, id, "credit", amount, after, source, reason, reference, at); err != nil || source != "api" {
+		return after, err
+	}
+	return after, totals.Add(ctx, tx, scope, playerID, at, totals.Delta{Metric: totals.Credit(currencyKey), Amount: amount})
 }
 
 // Spend removes amount from the player's balance inside tx. The WHERE clause is the
@@ -89,7 +93,10 @@ func Spend(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, c
 	if err != nil {
 		return 0, err
 	}
-	return after, insertLedger(ctx, tx, scope, playerID, id, "spend", amount, after, "api", reason, reference, at)
+	if err = insertLedger(ctx, tx, scope, playerID, id, "spend", amount, after, "api", reason, reference, at); err != nil {
+		return after, err
+	}
+	return after, totals.Add(ctx, tx, scope, playerID, at, totals.Delta{Metric: totals.Spend(currencyKey), Amount: amount})
 }
 
 func insertLedger(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, currencyID, operation string, amount, after int64, source, reason, reference string, at time.Time) error {

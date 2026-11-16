@@ -15,7 +15,10 @@ import (
 	"realmstack-backend/internal/ai"
 	"realmstack-backend/internal/demo"
 	"realmstack-backend/internal/httpapi"
+	"realmstack-backend/internal/limits"
+	"realmstack-backend/internal/maintenance"
 	"realmstack-backend/internal/persistence"
+	"realmstack-backend/internal/platform"
 )
 
 func main() {
@@ -23,25 +26,27 @@ func main() {
 	slog.SetDefault(logger)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, env("DATABASE_URL", "postgres://realmstack:realmstack@localhost:5432/realmstack?sslmode=disable"))
-	if err != nil {
-		logger.Error("database configuration failed", "error", err)
-		os.Exit(1)
-	}
+	// DATABASE_URL serves requests and may point at PgBouncer in transaction mode (add
+	// default_query_exec_mode=exec and pool_max_conns to it). DATABASE_DIRECT_URL, when
+	// set, reaches PostgreSQL directly: migrations hold a session advisory lock, which a
+	// transaction-mode pooler cannot keep, and maintenance runs there too.
+	pool := connect(ctx, logger, "DATABASE_URL", env("DATABASE_URL", "postgres://realmstack:realmstack@localhost:5432/realmstack?sslmode=disable"))
 	defer pool.Close()
-	for {
-		err = pool.Ping(ctx)
-		if err == nil {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			logger.Error("database connection failed", "error", err)
-			os.Exit(1)
-		case <-time.After(500 * time.Millisecond):
-		}
+	direct := pool
+	if url := os.Getenv("DATABASE_DIRECT_URL"); url != "" {
+		direct = connect(ctx, logger, "DATABASE_DIRECT_URL", url)
+		defer direct.Close()
 	}
-	if err = persistence.Migrate(ctx, pool); err != nil {
+	var replica *pgxpool.Pool
+	if url := os.Getenv("DATABASE_REPLICA_URL"); url != "" {
+		replica = connect(ctx, logger, "DATABASE_REPLICA_URL", url)
+		defer replica.Close()
+	}
+	if cost := httpapi.ParseIntEnv("BCRYPT_COST", platform.BcryptCost); cost >= 4 && cost <= 31 {
+		platform.BcryptCost = cost
+	}
+	var err error
+	if err = persistence.Migrate(ctx, direct); err != nil {
 		logger.Error("database migration failed", "error", err)
 		os.Exit(1)
 	}
@@ -53,6 +58,12 @@ func main() {
 		DemoMode:       os.Getenv("DEMO_MODE") == "true",
 		TrustedProxies: list(os.Getenv("TRUSTED_PROXIES")),
 		AuthRateLimit:  httpapi.ParseIntEnv("AUTH_RATE_LIMIT_PER_MINUTE", 30),
+		Quotas: limits.Limits{
+			RequestsPerMinute: int64(httpapi.ParseIntEnv("QUOTA_REQUESTS_PER_MINUTE", 0)),
+			WritesPerMinute:   int64(httpapi.ParseIntEnv("QUOTA_WRITES_PER_MINUTE", 0)),
+			MaxBatchEntries:   httpapi.ParseIntEnv("QUOTA_MAX_BATCH_ENTRIES", 0),
+		},
+		CredentialCacheTTL: duration("CREDENTIAL_CACHE_TTL", 30*time.Second),
 		AI: ai.Config{
 			EncryptionKey:   os.Getenv("AI_ENCRYPTION_KEY"),
 			Timeout:         duration("AI_TIMEOUT", 3*time.Minute),
@@ -86,7 +97,12 @@ func main() {
 		}
 	}
 	api := httpapi.New(pool, cfg, logger)
+	api.Env.ReadDB = replica // nil without a replica: reads use the primary
 	srv := api.HTTPServer(env("HTTP_ADDR", ":8080"))
+	background, stopBackground := context.WithCancel(context.Background())
+	defer stopBackground()
+	api.Start(background)
+	go maintenance.Run(background, direct, logger, duration("MAINTENANCE_INTERVAL", time.Hour))
 
 	// Stop accepting connections on SIGINT/SIGTERM and let in-flight requests finish.
 	stop, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -126,6 +142,26 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// connect opens a pool and waits up to the startup deadline for the database.
+func connect(ctx context.Context, logger *slog.Logger, name, url string) *pgxpool.Pool {
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		logger.Error("database configuration failed", "setting", name, "error", err)
+		os.Exit(1)
+	}
+	for {
+		if err = pool.Ping(ctx); err == nil {
+			return pool
+		}
+		select {
+		case <-ctx.Done():
+			logger.Error("database connection failed", "setting", name, "error", err)
+			os.Exit(1)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 func duration(key string, fallback time.Duration) time.Duration {
