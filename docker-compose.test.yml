@@ -17,7 +17,7 @@ services:
       retries: 30
 
   test:
-    image: golang:1.22-alpine
+    image: golang:1.27-alpine
     working_dir: /src
     volumes:
       - .:/src

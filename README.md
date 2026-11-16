@@ -1,6 +1,6 @@
 # RealmStack backend
 
-A Go/Gin modular monolith backed by PostgreSQL. It provides dashboard authentication and tenant-owned projects/environments, hashed/revocable server credentials, player registration and rotating refresh tokens, published environment configuration, inventory/economy, pinned XP progression, PostgreSQL leaderboards, server-reported stats and flags, and achievements and quests on a shared goal engine. Redis and AI features are not included yet.
+A Go/Gin modular monolith backed by PostgreSQL. It provides dashboard authentication and tenant-owned projects/environments, hashed/revocable server credentials, player registration and rotating refresh tokens, published environment configuration, inventory/economy, pinned XP progression, PostgreSQL leaderboards, server-reported stats and flags, achievements and quests on a shared goal engine, and an optional AI configuration assistant (bring your own OpenAI key). Redis is not included yet. It needs Go 1.27.
 
 **The API contract is [`api/openapi.yaml`](api/openapi.yaml).** Every route is documented there, `TestOpenAPICoversEveryRoute` fails when routes and the document disagree, and the frontend generates its TypeScript client from it. Update it in the same change as any route.
 
@@ -23,12 +23,13 @@ internal/stats/          server-reported counters and flags
 internal/goals/          shared goal engine: conditions, validation, LoadFacts/Evaluate, ApplyRewards
 internal/achievements/   achievement progress, hidden masking, claims, claim statistics
 internal/quests/         quest periods, pure status evaluation, accept/abandon/claim, quest statistics
+internal/ai/             AI assistant: key encryption, OpenAI adapter, strict schemas, prompts, background generations, apply
 internal/demo/           local demo seed
 migrations/              numbered SQL files
 api/openapi.yaml         API contract
 ```
 
-Packages import `platform` and each other only downward (`quests` → `achievements` → `goals` → `inventory`/`economy`/`progression` → `platform`), so there are no cycles; `httpapi` wires everything together.
+Packages import `platform` and each other only downward (`ai` → `catalog`; `quests` → `achievements` → `goals` → `inventory`/`economy`/`progression` → `platform`), so there are no cycles; `httpapi` wires everything together.
 
 This folder is an independent Git repository. The integrated Compose setup is owned by the sibling `realmstack-frontend/` repository and builds this API from the sibling path; keep both repositories side-by-side to run the full dashboard + API demo. The Go source walkthrough is in `../study/realmstack-backend-guide.html` when using the original workspace.
 
@@ -97,6 +98,7 @@ Replace `PLAYER_UUID` with the `player.id` returned at login or registration. Fo
 * `GET|PUT /v1/projects/{projectId}/environments/{envId}/configurations/draft`
 * `POST /v1/projects/{projectId}/environments/{envId}/configurations/publish`
 * `GET /v1/projects/{projectId}/environments/{envId}/configurations/versions`
+* `POST /v1/projects/{projectId}/environments/{envId}/configurations/versions/{version}/rollback` republishes an earlier version as a new version (history is never rewritten) and resets the draft to it, keeping `editor_layout`. The old configuration must pass today's rules, including the history-dependent ones.
 
 Definition edits change only the draft:
 
@@ -173,6 +175,20 @@ Supply `X-Server-Credential: {credential}`:
 * `GET /v1/server/players/{playerId}/quests`; `POST .../quests/{key}/accept|claim` (claim works for any claim policy)
 
 The configured item/currency definitions must be published before use. Grant/consume quantities and credit/spend amounts must be positive. Economy, XP, stat, quest and claim writes use one transaction, a scoped idempotency record and an immutable ledger entry (`platform.Env.Mutate`). Ledger rows are stamped with the request clock (`Env.Now`), the same clock that stamps quest acceptances, so quest windows compare like with like (and tests can move time). A claim pays every reward with the normal stack and balance rules; if any reward fails (for example a full stack) the whole claim rolls back. A key replay with the same normalized request returns the saved result; reuse with a different payload yields HTTP 409.
+
+## AI configuration assistant (optional)
+
+Users bring their own OpenAI key; the assistant proposes definitions, and people decide. It is off unless the deployment sets `AI_ENCRYPTION_KEY` (a base64-encoded 32-byte key, for example `openssl rand -base64 32`); without it the AI routes answer `503 AI_UNAVAILABLE` and everything else works unchanged. A malformed key stops startup.
+
+* `GET|PUT|DELETE /v1/ai/settings` (per dashboard user): `{"provider":"openai","model":"gpt-5.5","api_key":"sk-..."}`. The key is encrypted at rest with AES-256-GCM (bound to the user ID) and is write-only: responses show only `key_last4`. Omit `api_key` to change only the model. `POST /v1/ai/settings/test` checks the key and model (`422 AI_KEY_REJECTED` / `AI_MODEL_NOT_FOUND`).
+* `POST /v1/projects/{projectId}/environments/{envId}/ai/generations` with `{"operation":"quests","params":{"brief":"...","count":3,"quest_type":"story","stage_count":3},"merge_policy":"add"}` starts a generation and answers `202`; poll `GET .../ai/generations/{id}`. Operations: `items`, `economy` (currencies plus advisory prices: the configuration has no price field), `progression`, `achievements`, `quests`, `explain` (`params.question`) and `tests` (candidate test cases).
+* The model receives an allow-listed view of the **draft only** (keys, names, kinds, conditions, rewards; item metadata reduced to `slot`) plus the brief. No player, ledger, credential or user data is read. The OpenAI request uses a strict JSON Schema per operation, `store: false`, an output token cap and a reasoning effort.
+* The output is decoded strictly (unknown fields rejected), merged into a copy of the draft, and checked with `catalog.CheckConfig`, the same rules publish uses. A generation ends `valid`, `invalid` (with field errors), `answered` (explain/tests) or `failed` (with a code such as `AI_RATE_LIMITED`, `AI_OUTPUT_TRUNCATED`, `AI_REFUSED`, `AI_TIMEOUT`). `merge_policy: add` rejects keys that already exist; `replace` overwrites them.
+* `POST .../ai/generations/{id}/apply` is the human approval: it merges a `valid` proposal into the **draft** after re-validating it against the current draft (`409 DRAFT_CHANGED` if it no longer fits, `409 ALREADY_APPLIED`, `422 NOT_APPLICABLE`). It never publishes; the normal publish is the second, separate step. `POST .../discard` closes a finished generation.
+* Generations run in the background (the HTTP write timeout is 30 s; a generation can take minutes). Ones left running by a restart are marked `failed` (`ABANDONED_BY_RESTART`) on startup; shutdown waits for them within the grace period.
+* Limits: `AI_TIMEOUT` (3m), `AI_MAX_OUTPUT_TOKENS` (32000), `AI_GENERATIONS_PER_MINUTE` (6 per user, in process), `AI_MAX_RUNNING_PER_USER` (2). Logs record operation, status, token usage and duration; never keys, prompts or outputs.
+
+Deviation from spec 7.3: AI output is stored as proposals (`ai_generations`) that are merged into the single editable draft, rather than as extra draft configuration versions. Version numbering and the published configuration stay untouched until a person publishes.
 
 ## Configuration and checks
 

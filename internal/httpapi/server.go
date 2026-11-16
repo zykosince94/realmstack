@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"realmstack-backend/internal/ai"
 	"realmstack-backend/internal/platform"
 	"realmstack-backend/internal/players"
 )
@@ -33,11 +34,14 @@ type Config struct {
 	// AuthRateLimit is the number of authentication attempts allowed per client IP,
 	// per route, per minute. Zero uses the default of 30.
 	AuthRateLimit int
+	// AI configures the optional AI assistant; an empty encryption key disables it.
+	AI ai.Config
 }
 
 // Server owns the Gin engine and the shared Env.
 type Server struct {
 	Env     *platform.Env
+	AI      *ai.Service
 	cfg     Config
 	router  *gin.Engine
 	limiter *rateLimiter
@@ -61,6 +65,14 @@ func New(db *pgxpool.Pool, cfg Config, logger *slog.Logger) *Server {
 		router:  gin.New(),
 		limiter: newRateLimiter(cfg.AuthRateLimit, time.Minute),
 	}
+	assistant, err := ai.NewService(s.Env, cfg.AI)
+	if err != nil {
+		// cmd/api validates the key before starting; reaching here means a programming
+		// error, so fail safe: run with the assistant disabled.
+		logger.Error("AI assistant disabled: invalid configuration", "error", err)
+		assistant, _ = ai.NewService(s.Env, ai.Config{})
+	}
+	s.AI = assistant
 	// Gin trusts every proxy by default, which would let any client spoof X-Forwarded-For.
 	if err := s.router.SetTrustedProxies(cfg.TrustedProxies); err != nil {
 		logger.Error("invalid trusted proxy configuration; trusting no proxies", "error", err)

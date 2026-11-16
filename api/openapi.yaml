@@ -4,7 +4,7 @@
 openapi: "3.0.3"
 info:
   title: "RealmStack API"
-  version: "0.6.0"
+  version: "0.7.0"
   description: "Multi-tenant game backend. Every response uses {data, meta}; every error uses {error:{code,message,details}, meta}. Mutations require an Idempotency-Key: a replay returns the stored result and status, a different request with the same key returns 409. This document is the API contract: the frontend generates its client from it, and a backend test fails if a route is missing here."
 servers:
   - url: "http://localhost:8080"
@@ -21,6 +21,7 @@ tags:
   - name: stats
   - name: achievements
   - name: quests
+  - name: ai
 paths:
   "/healthz":
     get:
@@ -3829,6 +3830,442 @@ paths:
           "$ref": "#/components/responses/E409"
         "422":
           "$ref": "#/components/responses/E422"
+  "/v1/ai/settings":
+    get:
+      operationId: getAiSettings
+      tags:
+        - ai
+      summary: "The signed-in user's AI provider settings. The key is never returned, only its last four characters. 503 AI_UNAVAILABLE when the deployment has no AI_ENCRYPTION_KEY."
+      security:
+        - userBearer: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/AISettings"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "503":
+          "$ref": "#/components/responses/E503"
+    put:
+      operationId: putAiSettings
+      tags:
+        - ai
+      summary: "Store provider, model and (write-only) API key; the key is encrypted at rest. Omit api_key to change only the model."
+      security:
+        - userBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/AISettingsInput"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/AISettings"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "422":
+          "$ref": "#/components/responses/E422"
+        "503":
+          "$ref": "#/components/responses/E503"
+    delete:
+      operationId: deleteAiSettings
+      tags:
+        - ai
+      summary: "Remove the stored provider key."
+      security:
+        - userBearer: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Deleted"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "503":
+          "$ref": "#/components/responses/E503"
+  "/v1/ai/settings/test":
+    post:
+      operationId: postAiSettingsTest
+      tags:
+        - ai
+      summary: "Check the stored key and model against the provider. 409 AI_NOT_CONFIGURED; 422 AI_KEY_REJECTED or AI_MODEL_NOT_FOUND; 429 AI_RATE_LIMITED; 502 AI_PROVIDER_UNAVAILABLE."
+      security:
+        - userBearer: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/AISettingsTest"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+        "429":
+          "$ref": "#/components/responses/E429"
+        "502":
+          "$ref": "#/components/responses/E502"
+        "503":
+          "$ref": "#/components/responses/E503"
+  "/v1/projects/{projectId}/environments/{envId}/ai/generations":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidAiGenerations
+      tags:
+        - ai
+      summary: "The environment's 50 most recent AI generations, newest first."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/AIGeneration"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "503":
+          "$ref": "#/components/responses/E503"
+    post:
+      operationId: postProjectsByProjectidEnvironmentsByEnvidAiGenerations
+      tags:
+        - ai
+      summary: "Start a generation (202). It runs in the background; poll GET .../generations/{id}. A proposal is validated like hand-written configuration and changes nothing until applied. 409 AI_NOT_CONFIGURED; 422 VALIDATION_ERROR; 429 AI_BUSY or RATE_LIMITED."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/AIGenerationRequest"
+      responses:
+        "202":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/AIGeneration"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+        "429":
+          "$ref": "#/components/responses/E429"
+        "503":
+          "$ref": "#/components/responses/E503"
+  "/v1/projects/{projectId}/environments/{envId}/ai/generations/{id}":
+    get:
+      operationId: getProjectsByProjectidEnvironmentsByEnvidAiGenerationsById
+      tags:
+        - ai
+      summary: "One generation (poll this while it runs)."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: id
+          in: path
+          required: true
+          description: "Generation ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/AIGeneration"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "503":
+          "$ref": "#/components/responses/E503"
+  "/v1/projects/{projectId}/environments/{envId}/ai/generations/{id}/apply":
+    post:
+      operationId: postProjectsByProjectidEnvironmentsByEnvidAiGenerationsByIdApply
+      tags:
+        - ai
+      summary: "Human approval: merge a valid proposal into the draft (never publishes). It is re-validated against the current draft. 409 ALREADY_APPLIED or DRAFT_CHANGED; 422 NOT_APPLICABLE or INVALID_CONFIGURATION."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: id
+          in: path
+          required: true
+          description: "Generation ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/AIGeneration"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+        "503":
+          "$ref": "#/components/responses/E503"
+  "/v1/projects/{projectId}/environments/{envId}/ai/generations/{id}/discard":
+    post:
+      operationId: postProjectsByProjectidEnvironmentsByEnvidAiGenerationsByIdDiscard
+      tags:
+        - ai
+      summary: "Close a finished, unapplied generation. 409 NOT_DISCARDABLE."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: id
+          in: path
+          required: true
+          description: "Generation ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/AIGeneration"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "503":
+          "$ref": "#/components/responses/E503"
+  "/v1/projects/{projectId}/environments/{envId}/configurations/versions/{version}/rollback":
+    post:
+      operationId: postProjectsByProjectidEnvironmentsByEnvidConfigurationsVersionsByVersionRollback
+      tags:
+        - configuration
+      summary: "Republish an earlier version as a new version (history is never rewritten) and reset the draft to it, keeping editor_layout. 422 INVALID_CONFIGURATION if it breaks today's rules."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: version
+          in: path
+          required: true
+          description: "The configuration version number to restore."
+          schema:
+            type: integer
+      responses:
+        "201":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/RollbackResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "422":
+          "$ref": "#/components/responses/E422"
 components:
   securitySchemes:
     userBearer:
@@ -3860,6 +4297,18 @@ components:
         minLength: 1
         maxLength: 200
   responses:
+    E502:
+      description: "The AI provider failed or could not be reached."
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/ErrorResponse"
+    E503:
+      description: "The AI assistant is not enabled on this deployment."
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/ErrorResponse"
     E400:
       description: "Malformed request or missing Idempotency-Key."
       content:
@@ -3903,6 +4352,262 @@ components:
           schema:
             "$ref": "#/components/schemas/ErrorResponse"
   schemas:
+    AISettings:
+      type: object
+      properties:
+        configured:
+          type: boolean
+        provider:
+          type: string
+          nullable: true
+        model:
+          type: string
+          nullable: true
+        key_last4:
+          type: string
+          nullable: true
+          description: "The last four characters of the stored key; the key itself is never returned."
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        providers:
+          type: array
+          items:
+            type: string
+      required:
+        - configured
+        - provider
+        - model
+        - key_last4
+        - updated_at
+        - providers
+    AISettingsInput:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum:
+            - openai
+        model:
+          type: string
+          description: "Provider model ID, e.g. gpt-5.5."
+        api_key:
+          type: string
+          description: "Write-only. Required the first time; omit to keep the stored key."
+      required:
+        - provider
+        - model
+    AISettingsTest:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        provider:
+          type: string
+        model:
+          type: string
+      required:
+        - ok
+        - provider
+        - model
+    AIParams:
+      type: object
+      description: "The person's brief. Each operation uses the fields that apply to it; defaults fill the rest."
+      properties:
+        brief:
+          type: string
+          maxLength: 2000
+        count:
+          type: integer
+        levels:
+          type: integer
+        pacing:
+          type: string
+          enum:
+            - gentle
+            - steady
+            - steep
+        quest_type:
+          type: string
+          enum:
+            - story
+            - side
+            - daily
+            - weekly
+            - event
+        stage_count:
+          type: integer
+        question:
+          type: string
+          maxLength: 2000
+    AIGenerationRequest:
+      type: object
+      properties:
+        operation:
+          type: string
+          enum:
+            - items
+            - economy
+            - progression
+            - achievements
+            - quests
+            - explain
+            - tests
+        params:
+          "$ref": "#/components/schemas/AIParams"
+        merge_policy:
+          type: string
+          enum:
+            - add
+            - replace
+          default: add
+          description: "add rejects keys that already exist in the draft; replace overwrites them."
+      required:
+        - operation
+    AIProposal:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            "$ref": "#/components/schemas/ItemDefinition"
+        currencies:
+          type: array
+          items:
+            "$ref": "#/components/schemas/CurrencyDefinition"
+        progression:
+          type: array
+          items:
+            type: integer
+            format: int64
+        stats:
+          type: array
+          items:
+            "$ref": "#/components/schemas/StatDefinition"
+        achievements:
+          type: array
+          items:
+            "$ref": "#/components/schemas/AchievementDefinition"
+        quests:
+          type: array
+          items:
+            "$ref": "#/components/schemas/QuestDefinition"
+    AIGeneration:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        operation:
+          type: string
+          enum:
+            - items
+            - economy
+            - progression
+            - achievements
+            - quests
+            - explain
+            - tests
+        params:
+          "$ref": "#/components/schemas/AIParams"
+        merge_policy:
+          type: string
+          enum:
+            - add
+            - replace
+        provider:
+          type: string
+        model:
+          type: string
+        status:
+          type: string
+          enum:
+            - pending
+            - running
+            - valid
+            - invalid
+            - answered
+            - failed
+            - applied
+            - discarded
+        proposal:
+          allOf:
+            - "$ref": "#/components/schemas/AIProposal"
+          nullable: true
+        answer:
+          nullable: true
+          description: "explain: a string; tests: an array of cases; economy: advisory price suggestions."
+        notes:
+          type: string
+        errors:
+          type: array
+          items:
+            "$ref": "#/components/schemas/FieldError"
+          description: "Why the proposal is invalid. Paths refer to the merged draft, or proposal.<collection>[i] for key conflicts."
+        error:
+          type: object
+          nullable: true
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+          required:
+            - code
+            - message
+        usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+              format: int64
+            output_tokens:
+              type: integer
+              format: int64
+          required:
+            - input_tokens
+            - output_tokens
+        created_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        applied_at:
+          type: string
+          format: date-time
+          nullable: true
+        appliable:
+          type: boolean
+      required:
+        - id
+        - operation
+        - params
+        - merge_policy
+        - provider
+        - model
+        - status
+        - proposal
+        - answer
+        - notes
+        - errors
+        - error
+        - usage
+        - created_at
+        - finished_at
+        - applied_at
+        - appliable
+    RollbackResult:
+      allOf:
+        - "$ref": "#/components/schemas/PublishResult"
+        - type: object
+          properties:
+            rolled_back_from:
+              type: integer
+          required:
+            - rolled_back_from
     QuestStage:
       type: object
       properties:

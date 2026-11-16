@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -746,21 +747,7 @@ func (h Handler) Publish(c *gin.Context) {
 		platform.Respond(c, invalidConfiguration(errs))
 		return
 	}
-	var version int
-	err = tx.QueryRow(c, `SELECT COALESCE(MAX(version),0)+1 FROM configuration_versions WHERE project_id=$1 AND environment_id=$2`, projectID, envID).Scan(&version)
-	if err != nil {
-		platform.Internal(c, err)
-		return
-	}
-	var versionID string
-	var publishedAt time.Time
-	err = tx.QueryRow(c, `INSERT INTO configuration_versions(project_id,environment_id,version,config,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id::text,published_at`,
-		projectID, envID, version, raw, platform.GetPrincipal(c).ID).Scan(&versionID, &publishedAt)
-	if err != nil {
-		platform.Internal(c, err)
-		return
-	}
-	progression, created, err := ApplyRuntimeConfig(c, tx, projectID, envID, versionID, cfg, h.Now())
+	result, err := h.publishVersion(c, tx, projectID, envID, raw, cfg)
 	if err != nil {
 		platform.Internal(c, err)
 		return
@@ -769,7 +756,104 @@ func (h Handler) Publish(c *gin.Context) {
 		platform.Internal(c, err)
 		return
 	}
-	platform.Success(c, http.StatusCreated, gin.H{"version": version, "published_at": publishedAt.UTC(), "progression_version": progression, "progression_version_created": created})
+	platform.Success(c, http.StatusCreated, result)
+}
+
+// publishVersion writes raw as the next immutable version, recording who published
+// it, and switches the runtime definitions to it. The caller has validated cfg and
+// commits tx.
+func (h Handler) publishVersion(c *gin.Context, tx pgx.Tx, projectID, envID string, raw []byte, cfg Config) (gin.H, error) {
+	var version int
+	if err := tx.QueryRow(c, `SELECT COALESCE(MAX(version),0)+1 FROM configuration_versions WHERE project_id=$1 AND environment_id=$2`, projectID, envID).Scan(&version); err != nil {
+		return nil, err
+	}
+	var versionID string
+	var publishedAt time.Time
+	if err := tx.QueryRow(c, `INSERT INTO configuration_versions(project_id,environment_id,version,config,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id::text,published_at`,
+		projectID, envID, version, raw, platform.GetPrincipal(c).ID).Scan(&versionID, &publishedAt); err != nil {
+		return nil, err
+	}
+	progression, created, err := ApplyRuntimeConfig(c, tx, projectID, envID, versionID, cfg, h.Now())
+	if err != nil {
+		return nil, err
+	}
+	return gin.H{"version": version, "published_at": publishedAt.UTC(), "progression_version": progression, "progression_version_created": created}, nil
+}
+
+// Rollback republishes an earlier version as a new version (spec 7.3); history is
+// never rewritten. The old configuration must still pass today's rules, including the
+// history-dependent ones (a stat that has since recorded values keeps its kind). The
+// draft is reset to the restored configuration too, keeping its editor_layout;
+// otherwise the next publish of the old draft would silently undo the rollback.
+func (h Handler) Rollback(c *gin.Context) {
+	projectID, envID := platform.Owned(c)
+	target, err := strconv.Atoi(c.Param("version"))
+	if err != nil || target < 1 {
+		platform.NotFound(c)
+		return
+	}
+	tx, err := h.DB.Begin(c)
+	if err != nil {
+		platform.Internal(c, err)
+		return
+	}
+	defer tx.Rollback(c)
+	draftRaw, err := LockDraft(c, tx, projectID, envID)
+	if err != nil {
+		platform.Internal(c, err)
+		return
+	}
+	var raw []byte
+	err = tx.QueryRow(c, `SELECT config FROM configuration_versions WHERE project_id=$1 AND environment_id=$2 AND version=$3`, projectID, envID, target).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		platform.Fail(c, http.StatusNotFound, "NOT_FOUND", "That configuration version does not exist.")
+		return
+	}
+	if err != nil {
+		platform.Internal(c, err)
+		return
+	}
+	restored := withLayoutOf(raw, draftRaw)
+	cfg, errs, err := CheckConfig(c, tx, projectID, envID, restored)
+	if err != nil {
+		platform.Internal(c, err)
+		return
+	}
+	if len(errs) > 0 {
+		platform.Respond(c, invalidConfiguration(errs))
+		return
+	}
+	result, err := h.publishVersion(c, tx, projectID, envID, restored, cfg)
+	if err != nil {
+		platform.Internal(c, err)
+		return
+	}
+	if err = WriteDraft(c, tx, projectID, envID, restored); err != nil {
+		platform.Internal(c, err)
+		return
+	}
+	if err = tx.Commit(c); err != nil {
+		platform.Internal(c, err)
+		return
+	}
+	result["rolled_back_from"] = target
+	platform.Success(c, http.StatusCreated, result)
+}
+
+// withLayoutOf returns raw (normalized) carrying the editor_layout of draft, if any.
+func withLayoutOf(raw, draft []byte) []byte {
+	out, ok := normalizeDraft(raw)
+	if !ok {
+		return raw
+	}
+	delete(out, "editor_layout")
+	if current, ok := normalizeDraft(draft); ok {
+		if layout, has := current["editor_layout"]; has {
+			out["editor_layout"] = layout
+		}
+	}
+	b, _ := json.Marshal(out)
+	return b
 }
 
 func (h Handler) ListVersions(c *gin.Context) {
