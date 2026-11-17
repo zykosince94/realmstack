@@ -1,6 +1,10 @@
 # Runs vet, unit tests and PostgreSQL integration tests in containers.
 #   docker compose -f docker-compose.test.yml run --rm test
-# The database lives in tmpfs and disappears when the containers stop.
+# The database lives in tmpfs and disappears when the containers stop. Containers are
+# named realmstack-test-<service>-1 and the Go module cache is the volume
+# realmstack-test_go-mod-cache, kept between runs so dependencies download once.
+name: realmstack-test
+
 services:
   test-db:
     image: postgres:17-alpine

@@ -38,8 +38,10 @@ This folder is an independent Git repository. The integrated Compose setup is ow
 Requires Docker Desktop with Compose. In this repository folder:
 
 ```powershell
-docker compose up --build
+docker compose up -d --build --wait
 ```
+
+This standalone stack is the Compose project `realmstack-backend` (containers `realmstack-backend-db-1` and `realmstack-backend-api-1`, bound to `127.0.0.1`). It shares host port 8080 with the full stack in the frontend repository, so run one at a time.
 
 The API is at `http://localhost:8080`; health check: `GET /healthz`. Compose explicitly sets `APP_ENV=local` and `DEMO_MODE=true`, so it seeds:
 

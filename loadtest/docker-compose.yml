@@ -10,6 +10,8 @@ name: realmstack-load
 x-api: &api
   build:
     context: ..
+  # One shared image for every API instance and tool, so it is built and listed once.
+  image: realmstack-api:load
   environment: &api-env
     # Requests go through PgBouncer in transaction mode with pgx's default cached
     # prepared statements: PgBouncer 1.21+ tracks them per server connection
@@ -67,7 +69,7 @@ services:
       -c, shared_preload_libraries=pg_stat_statements, -c, pg_stat_statements.track=top]
     shm_size: 1gb
     volumes:
-      - load-db:/var/lib/postgresql/data
+      - db-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U realmstack -d realmstack"]
       interval: 2s
@@ -135,4 +137,4 @@ services:
     depends_on: [api1, api2, api3]
 
 volumes:
-  load-db:
+  db-data:

@@ -1,3 +1,16 @@
+# Standalone backend demo: database and API only (no dashboard).
+#
+#   docker compose up -d --build --wait
+#   docker compose down                     # stop, keep the database
+#
+# The full stack with the dashboard lives in ../realmstack-frontend (project
+# `realmstack`); both publish host port 8080, so run one at a time. Credentials below
+# are LOCAL DEMO values: never reuse them anywhere real. Ports are bound to 127.0.0.1.
+#
+# Containers are named realmstack-backend-<service>-1, the image realmstack-api:local
+# (shared with the full stack) and the volume realmstack-backend_db-data.
+name: realmstack-backend
+
 services:
   db:
     image: postgres:17-alpine
@@ -11,9 +24,11 @@ services:
       timeout: 3s
       retries: 20
     volumes:
-      - realmstack-db:/var/lib/postgresql/data
+      - db-data:/var/lib/postgresql/data
+
   api:
     build: .
+    image: realmstack-api:local
     restart: unless-stopped
     environment:
       APP_ENV: local
@@ -22,9 +37,10 @@ services:
       JWT_SECRET: local-only-change-me-before-deploy-please
       DEMO_MODE: "true"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       db:
         condition: service_healthy
+
 volumes:
-  realmstack-db:
+  db-data:
