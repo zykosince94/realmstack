@@ -1,6 +1,6 @@
 # RealmStack backend
 
-A Go/Gin modular monolith backed by PostgreSQL. It provides dashboard authentication and tenant-owned projects/environments, hashed/revocable server credentials, player registration and rotating refresh tokens, published environment configuration, inventory/economy, pinned XP progression, PostgreSQL leaderboards, server-reported stats and flags, achievements and quests on a shared goal engine, and an optional AI configuration assistant (bring your own OpenAI key). Redis is not included yet. It needs Go 1.27.
+A Go/Gin modular monolith backed by PostgreSQL. It provides dashboard authentication and tenant-owned projects/environments, hashed/revocable server credentials, player registration and rotating refresh tokens, published environment configuration, inventory/economy, pinned XP progression, PostgreSQL leaderboards, server-reported stats and flags, achievements and quests on a shared goal engine, an optional AI configuration assistant (bring your own OpenAI key), and the Phase 8 scale layer (best-score and goal-total tables, batch writes, shared rate limits and quotas, partitioned ledgers, optional Redis rank projection). Redis is optional. It needs Go 1.27.
 
 **The API contract is [`api/openapi.yaml`](api/openapi.yaml).** Every route is documented there, `TestOpenAPICoversEveryRoute` fails when routes and the document disagree, and the frontend generates its TypeScript client from it. Update it in the same change as any route.
 
@@ -173,8 +173,35 @@ Supply `X-Server-Credential: {credential}`:
 * `GET /v1/server/players/{playerId}/stats`; `POST .../stats/{statKey}/increment` (`{"amount":3}`, positive only); `POST .../flags/{flagKey}/set` (body optional; set-only)
 * `GET /v1/server/players/{playerId}/achievements` (unmasked); `POST .../achievements/{key}/claim` (any claim policy)
 * `GET /v1/server/players/{playerId}/quests`; `POST .../quests/{key}/accept|claim` (claim works for any claim policy)
+* `POST /v1/server/batch` (`{"entries":[{"type":"grant|credit|xp|stat|flag","idempotency_key":"...","player_id":"...", ...}]}`): up to the project's `max_batch_entries` (default 500). Each entry runs the normal idempotency algorithm in its own savepoint, so a failing entry is reported in the 200 response and does not roll back the others; entries for one player apply in request order. `422 BATCH_SIZE`; `429 QUOTA_EXCEEDED` counts every entry as a write.
 
 The configured item/currency definitions must be published before use. Grant/consume quantities and credit/spend amounts must be positive. Economy, XP, stat, quest and claim writes use one transaction, a scoped idempotency record and an immutable ledger entry (`platform.Env.Mutate`). Ledger rows are stamped with the request clock (`Env.Now`), the same clock that stamps quest acceptances, so quest windows compare like with like (and tests can move time). A claim pays every reward with the normal stack and balance rules; if any reward fails (for example a full stack) the whole claim rolls back. A key replay with the same normalized request returns the saved result; reuse with a different payload yields HTTP 409.
+
+## Scale and operations (Phase 8)
+
+The runtime is built for many API instances sharing one PostgreSQL database; PostgreSQL stays the source of truth and Redis is optional.
+
+* **Leaderboards:** `leaderboard_best_scores` holds one row per player and board, updated in the score-submission transaction. Top-N is an index scan and a rank is one indexed count. With `REDIS_URL` set, ranks come from a Redis sorted set fed through a transactional outbox (`leaderboard_outbox`); a board is served from Redis only after a full replay, and any mismatch falls back to PostgreSQL.
+* **Redis rules:** Redis is trusted once a board is ready, so set `REDIS_URL` on every instance or none (after running without it, run `realmstack-admin rebuild-projection`), and never let Redis evict (`maxmemory-policy noeviction`, the default without a memory limit). Scores are bounded to ±(2^53−1) at submit (`422 VALIDATION_ERROR`) and by a CHECK constraint, because sorted-set scores are float64.
+* **Goal totals:** `player_goal_totals` holds all-time sums of `source='api'` ledger rows, written in the same transaction as each ledger row. Achievements read totals; windowed quest conditions still read the ledgers.
+* **Quotas and rate limits:** per-project `project_quotas` (defaults `QUOTA_REQUESTS_PER_MINUTE`, `QUOTA_WRITES_PER_MINUTE`, `QUOTA_MAX_BATCH_ENTRIES`) return `429 QUOTA_EXCEEDED` with `Retry-After`. Instances count locally and fold into a shared row every 250 ms, so the overshoot across instances is bounded by what they admit in one interval. Login and registration limits are exact, shared counters in PostgreSQL.
+* **Retention:** the four ledgers are range-partitioned by month; a maintenance loop (`MAINTENANCE_INTERVAL`, default 1 h, one instance per run) creates partitions three months ahead and purges idempotency records after 30 days (a key replayed after expiry is treated as new, so clients must not retry a write after 30 days).
+* **Connections:** `DATABASE_URL` may point at PgBouncer in transaction mode (the default pgx mode works with PgBouncer 1.21+ and `max_prepared_statements`). `DATABASE_DIRECT_URL` is used for migrations and maintenance, which need session state. `DATABASE_REPLICA_URL` (optional) serves lag-tolerant reads: leaderboard rankings and goal progress. Claims, accepts and every write use the primary.
+* **Credential cache:** successful server-credential lookups are cached for `CREDENTIAL_CACHE_TTL` (default 30 s, at most 60 s); the secret is checked on every request, and revoking a credential or archiving a project drops its entries on that instance at once. Other instances notice within the TTL.
+* **Write pipelining:** ledger and total writes whose result nobody reads are queued (`platform.DeferExec`) and sent in the same round trip as the transaction's next statement. Any later statement flushes the queue first, so reads see the rows and a failure surfaces on the statement it was sent with.
+
+Operator commands (`realmstack-admin`, using `DATABASE_DIRECT_URL`):
+
+```sh
+realmstack-admin migrate
+realmstack-admin maintenance            # partitions, idempotency purge, old rate-limit windows
+realmstack-admin rebuild-leaderboards   # best scores from submissions (and replay Redis)
+realmstack-admin rebuild-projection     # replay every board into Redis
+realmstack-admin rebuild-goal-totals    # totals from the ledgers
+realmstack-admin verify                 # compare all derived data with a recomputation; exit 1 on a difference
+```
+
+The load test (traffic profile, how to run it, how to read and profile results) is in [loadtest/README.md](loadtest/README.md). Its target is a tenant of 500,000 players, below the spec's 1M; the full-profile exit criterion has not been verified on target hardware. Migrations `007` and `008` recreate the ledgers, so an existing local demo database needs `docker compose down -v`.
 
 ## AI configuration assistant (optional)
 

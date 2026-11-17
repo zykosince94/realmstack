@@ -1,6 +1,7 @@
-// k6 load test for the spec 6.6 target profile: a large tenant with ~1M registered
-// players and ~100k concurrent, ~5,000 trusted writes per second, and a login surge of
-// ~100k players in 10 minutes (~167 logins/s).
+// k6 load test for the spec 6.6 target profile: a large tenant with ~500k registered
+// players (the spec says ~1M; reduced by decision, 2026-11-17), ~100k concurrent,
+// ~5,000 trusted writes per second, and a login surge of ~100k players in 10 minutes
+// (~167 logins/s).
 //
 // "100k concurrent players" is modelled as request rates, not 100k virtual users: an
 // online player's client polls now and then, so constant-arrival-rate scenarios drive
@@ -32,20 +33,27 @@ function scenario(fn, perSecond, duration, vus) {
   return { executor: "constant-arrival-rate", exec: fn, rate: rate(perSecond), timeUnit: "1s", duration, preAllocatedVUs: Math.ceil(vus * Math.max(SCALE, 0.25)), maxVUs: Math.ceil(vus * 2 * Math.max(SCALE, 0.25)) };
 }
 
+const allScenarios = {
+  // ~5,000 trusted writes/s: 4,500 single writes + 10 batches of 50 entries.
+  server_writes: scenario("serverWrite", 4500, DURATION, 400),
+  batch_writes: scenario("batchWrite", 10, DURATION, 20),
+  // Players submitting scores, reading leaderboards and polling their state.
+  score_submits: scenario("submitScore", 150, DURATION, 30),
+  leaderboard_top: scenario("leaderboardTop", 400, DURATION, 60),
+  leaderboard_rank: scenario("leaderboardRank", 400, DURATION, 60),
+  player_reads: scenario("playerRead", 2000, DURATION, 200),
+  // Login surge: 100k logins in 10 minutes is ~167/s (bcrypt cost 10).
+  login_surge: scenario("login", 167, LOGIN_DURATION, 200),
+};
+
+// SCENARIOS=server_writes,login_surge runs a subset (default: all), e.g. to measure
+// the steady traffic and the login surge separately.
+const only = (__ENV.SCENARIOS || "").split(",").filter(Boolean);
+const scenarios = only.length ? Object.fromEntries(only.map((n) => [n, allScenarios[n]])) : allScenarios;
+
 export const options = {
   setupTimeout: "5m",
-  scenarios: {
-    // ~5,000 trusted writes/s: 4,500 single writes + 10 batches of 50 entries.
-    server_writes: scenario("serverWrite", 4500, DURATION, 400),
-    batch_writes: scenario("batchWrite", 10, DURATION, 20),
-    // Players submitting scores, reading leaderboards and polling their state.
-    score_submits: scenario("submitScore", 150, DURATION, 30),
-    leaderboard_top: scenario("leaderboardTop", 400, DURATION, 60),
-    leaderboard_rank: scenario("leaderboardRank", 400, DURATION, 60),
-    player_reads: scenario("playerRead", 2000, DURATION, 200),
-    // Login surge: 100k logins in 10 minutes is ~167/s (bcrypt cost 10).
-    login_surge: scenario("login", 167, LOGIN_DURATION, 200),
-  },
+  scenarios,
   thresholds: {
     "http_req_duration{kind:write}": ["p(95)<150"],
     "http_req_duration{kind:leaderboard}": ["p(95)<50"],
