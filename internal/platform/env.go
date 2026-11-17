@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 // Env is the shared dependency set handed to every domain handler. Domain handlers
@@ -34,6 +35,9 @@ type Env struct {
 	ReadDB *pgxpool.Pool
 	// Credentials caches server-credential lookups (spec 6.6); nil disables caching.
 	Credentials *CredentialCache
+	// Redis enables the optional leaderboard rank projection (spec 6.6); nil means
+	// ranks come from PostgreSQL alone. PostgreSQL stays the source of truth.
+	Redis redis.UniversalClient
 }
 
 // Reader returns the pool for lag-tolerant reads: the replica when configured.
@@ -50,6 +54,7 @@ type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults
 }
 
 // Principal is the authenticated actor. For server credentials ID is the key prefix;

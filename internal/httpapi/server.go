@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"realmstack-backend/internal/ai"
+	"realmstack-backend/internal/leaderboards"
 	"realmstack-backend/internal/limits"
 	"realmstack-backend/internal/platform"
 	"realmstack-backend/internal/players"
@@ -121,6 +122,12 @@ func New(db *pgxpool.Pool, cfg Config, logger *slog.Logger) *Server {
 func (s *Server) Start(ctx context.Context) {
 	if s.Quotas != nil {
 		go s.Quotas.Run(ctx, 250*time.Millisecond, func(err error) { s.Env.Log.Error("quota sync failed", "error", err) })
+	}
+	// The rank projection drains the outbox every 100 ms when idle and repairs boards
+	// that are not ready (new boards, or Redis lost its data) every 30 s.
+	if s.Env.Redis != nil {
+		p := &leaderboards.Projection{DB: s.Env.DB, Redis: s.Env.Redis, Log: s.Env.Log}
+		go p.Run(ctx, 100*time.Millisecond, 30*time.Second)
 	}
 }
 

@@ -5960,6 +5960,8 @@ components:
         score:
           type: integer
           format: int64
+          minimum: -9007199254740991
+          maximum: 9007199254740991
       required:
         - score
     ScoreResult:

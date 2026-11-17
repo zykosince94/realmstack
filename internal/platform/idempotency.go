@@ -74,17 +74,25 @@ func (e *Env) Mutate(c *gin.Context, actor Principal, payload any, fn MutateFunc
 // guarantees as a single call. route is part of the request hash.
 func MutateIn(ctx context.Context, tx pgx.Tx, actor Principal, key, route string, payload any, fn MutateFunc) (int, json.RawMessage, error) {
 	kind := IdempotencyKind(actor)
-	// Serialize concurrent uses of one key; the primary key is the final guard.
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, actor.ProjectID+":"+actor.EnvironmentID+":"+kind+":"+actor.ID+":"+key); err != nil {
-		return 0, nil, err
-	}
 	body, _ := json.Marshal(gin.H{"route": route, "actor": actor.ID, "kind": kind, "payload": payload})
 	hash := Digest(string(body))
+	// One round trip for both: the lock serializes concurrent uses of one key (the
+	// primary key is the final guard) and the lookup runs after it, in pipeline order.
+	b := &pgx.Batch{}
+	b.Queue(`SELECT pg_advisory_xact_lock(hashtext($1))`, actor.ProjectID+":"+actor.EnvironmentID+":"+kind+":"+actor.ID+":"+key)
+	b.Queue(`SELECT request_hash,result,status_code FROM idempotency_records WHERE project_id=$1 AND environment_id=$2 AND actor_kind=$3 AND actor_id=$4 AND key=$5`,
+		actor.ProjectID, actor.EnvironmentID, kind, actor.ID, key)
+	br := tx.SendBatch(ctx, b)
 	var prior string
 	var stored []byte
 	var storedStatus int
-	err := tx.QueryRow(ctx, `SELECT request_hash,result,status_code FROM idempotency_records WHERE project_id=$1 AND environment_id=$2 AND actor_kind=$3 AND actor_id=$4 AND key=$5`,
-		actor.ProjectID, actor.EnvironmentID, kind, actor.ID, key).Scan(&prior, &stored, &storedStatus)
+	_, err := br.Exec()
+	if err == nil {
+		err = br.QueryRow().Scan(&prior, &stored, &storedStatus)
+	}
+	if cerr := br.Close(); cerr != nil && (err == nil || errors.Is(err, pgx.ErrNoRows)) {
+		err = cerr
+	}
 	switch {
 	case err == nil && prior != hash:
 		return 0, nil, &Error{Status: http.StatusConflict, Code: "IDEMPOTENCY_CONFLICT", Message: "Idempotency key was already used with a different request."}
@@ -93,17 +101,19 @@ func MutateIn(ctx context.Context, tx pgx.Tx, actor Principal, key, route string
 	case !errors.Is(err, pgx.ErrNoRows):
 		return 0, nil, err
 	}
+	// Ledger rows and totals that fn defers are sent with the record insert below.
+	tx = newPipeTx(tx)
 	status, result, err := fn(tx)
 	if err != nil {
 		return 0, nil, err
 	}
-	b, err := json.Marshal(result)
+	out, err := json.Marshal(result)
 	if err != nil {
 		return 0, nil, err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO idempotency_records(project_id,environment_id,actor_kind,actor_id,key,request_hash,result,status_code) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-		actor.ProjectID, actor.EnvironmentID, kind, actor.ID, key, hash, b, status); err != nil {
+		actor.ProjectID, actor.EnvironmentID, kind, actor.ID, key, hash, out, status); err != nil {
 		return 0, nil, err
 	}
-	return status, b, nil
+	return status, out, nil
 }

@@ -72,7 +72,7 @@ func AwardXP(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID 
 	_ = json.Unmarshal(raw, &thresholds)
 	a.Level = LevelFor(thresholds, a.TotalXP)
 	a.LeveledUp = a.Level > LevelFor(thresholds, a.TotalXP-amount)
-	_, err = tx.Exec(ctx, `INSERT INTO xp_transactions(player_id,project_id,environment_id,progression_version_id,amount,reason,reference,idempotency_key,request_hash,source,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+	err = platform.DeferExec(ctx, tx, `INSERT INTO xp_transactions(player_id,project_id,environment_id,progression_version_id,amount,reason,reference,idempotency_key,request_hash,source,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 		playerID, scope.ProjectID, scope.EnvironmentID, a.VersionID, amount, reason, reference, key, platform.Digest(fmt.Sprint(amount, reason, reference)), source, at)
 	if err != nil || source != "api" {
 		return a, err

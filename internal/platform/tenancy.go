@@ -3,6 +3,7 @@ package platform
 import (
 	"errors"
 	"net/http"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
@@ -22,10 +23,49 @@ func Owned(c *gin.Context) (projectID, envID string) {
 
 // PlayerInScope reports whether playerID belongs to the scope's project/environment.
 // A UUID is never authorization on its own: this predicate is.
+//
+// Positive answers are cached in memory (Phase 8): every server write checks scope, and
+// the lookup was one PostgreSQL round trip per request. Caching only "yes" is safe
+// because a player row never moves to another project or environment and is never
+// deleted (projects are archived, and archiving is enforced on the credential, whose
+// cache lives at most 60 s). If players ever become deletable, invalidate this cache.
 func PlayerInScope(c *gin.Context, q Querier, scope Principal, playerID string) bool {
+	cacheKey := scope.ProjectID + "/" + scope.EnvironmentID + "/" + playerID
+	if playerScopes.has(cacheKey) {
+		return true
+	}
 	var exists bool
 	err := q.QueryRow(c, `SELECT EXISTS(SELECT 1 FROM players WHERE id=$1 AND project_id=$2 AND environment_id=$3)`, playerID, scope.ProjectID, scope.EnvironmentID).Scan(&exists)
+	if err == nil && exists {
+		playerScopes.add(cacheKey)
+	}
 	return err == nil && exists
+}
+
+// scopeSet is a bounded set of confirmed player scopes. When it fills up it starts
+// over: simpler than LRU, and a miss only costs the lookup it saves.
+type scopeSet struct {
+	mu  sync.RWMutex
+	max int
+	m   map[string]struct{}
+}
+
+var playerScopes = &scopeSet{max: 200_000, m: map[string]struct{}{}}
+
+func (s *scopeSet) has(k string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.m[k]
+	return ok
+}
+
+func (s *scopeSet) add(k string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.m) >= s.max {
+		s.m = make(map[string]struct{}, s.max)
+	}
+	s.m[k] = struct{}{}
 }
 
 // ServerTarget returns the server principal re-targeted at the :playerId route param,

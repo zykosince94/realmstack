@@ -64,22 +64,29 @@ type seedPlayer struct {
 // which is recreated to reseed rather than deleting rows from append-only ledgers.
 func seedLoad(ctx context.Context, db *pgxpool.Pool, args []string) error {
 	fs := flag.NewFlagSet("seed-load", flag.ExitOnError)
-	players := fs.Int("players", 1_000_000, "number of players")
-	sample := fs.Int("sample", 20_000, "players written to the output file for k6")
+	players := fs.Int("players", 500_000, "number of players")
+	// The profile has ~100k players online, so k6 spreads writes over that many. The
+	// first runs used 20,000, which made per-player row locks collide far more often
+	// than real traffic would (and a batch locks 50 players until it commits).
+	sample := fs.Int("sample", 100_000, "players written to the output file for k6")
+	resample := fs.Bool("resample", false, "keep the existing tenant and only replace the player sample in -out")
 	out := fs.String("out", "loadtest/data/tenant.json", "output file")
-	bases := fs.String("base-urls", "http://api1:8080,http://api2:8080", "API base URLs k6 should spread requests across")
+	bases := fs.String("base-urls", "http://api1:8080,http://api2:8080,http://api3:8080", "API base URLs k6 should spread requests across")
 	cost := fs.Int("bcrypt-cost", platform.BcryptCost, "bcrypt cost for the shared player password hash")
 	_ = fs.Parse(args)
 	if *cost >= 4 && *cost <= 31 {
 		platform.BcryptCost = *cost
 	}
 
+	if *resample {
+		return resampleLoad(ctx, db, *sample, *out)
+	}
 	var exists bool
 	if err := db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM projects WHERE slug='load-test')`).Scan(&exists); err != nil {
 		return err
 	}
 	if exists {
-		return fmt.Errorf("a load-test tenant already exists; recreate the load-test database to reseed")
+		return fmt.Errorf("a load-test tenant already exists; recreate the load-test database to reseed, or pass -resample")
 	}
 	hash, err := platform.HashPassword(LoadPassword)
 	if err != nil {
@@ -156,11 +163,36 @@ func seedLoad(ctx context.Context, db *pgxpool.Pool, args []string) error {
 		}
 	}
 
-	rows, err := db.Query(ctx, `SELECT id::text,email FROM players WHERE project_id=$1 ORDER BY random() LIMIT $2`, projectID, *sample)
+	res := seedOutput{BaseURLs: strings.Split(*bases, ","), PublicEnvironmentID: public, Credential: prefix + "." + secret, Password: LoadPassword}
+	return writeSample(ctx, db, projectID, *sample, res, *out)
+}
+
+// resampleLoad replaces the player sample in an existing k6 file. The credential
+// secret exists only in that file (the database keeps a digest), so the file is the
+// source for everything except the players.
+func resampleLoad(ctx context.Context, db *pgxpool.Pool, sample int, out string) error {
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		return fmt.Errorf("-resample needs the existing %s: %w", out, err)
+	}
+	var res seedOutput
+	if err = json.Unmarshal(raw, &res); err != nil {
+		return err
+	}
+	var projectID string
+	if err = db.QueryRow(ctx, `SELECT e.project_id::text FROM environments e WHERE e.public_id=$1`, res.PublicEnvironmentID).Scan(&projectID); err != nil {
+		return fmt.Errorf("the tenant in %s is not in this database: %w", out, err)
+	}
+	return writeSample(ctx, db, projectID, sample, res, out)
+}
+
+// writeSample picks sample random players of the project and writes the k6 file.
+func writeSample(ctx context.Context, db *pgxpool.Pool, projectID string, sample int, res seedOutput, out string) error {
+	rows, err := db.Query(ctx, `SELECT id::text,email FROM players WHERE project_id=$1 ORDER BY random() LIMIT $2`, projectID, sample)
 	if err != nil {
 		return err
 	}
-	res := seedOutput{BaseURLs: strings.Split(*bases, ","), PublicEnvironmentID: public, Credential: prefix + "." + secret, Password: LoadPassword}
+	res.Players = nil
 	for rows.Next() {
 		var p seedPlayer
 		if err = rows.Scan(&p.ID, &p.Email); err != nil {
@@ -173,13 +205,13 @@ func seedLoad(ctx context.Context, db *pgxpool.Pool, args []string) error {
 	if err = rows.Err(); err != nil {
 		return err
 	}
-	if err = os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
+	if err = os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		return err
 	}
 	b, _ := json.MarshalIndent(res, "", "  ")
-	if err = os.WriteFile(*out, b, 0o644); err != nil {
+	if err = os.WriteFile(out, b, 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s (%d sample players)\n", *out, len(res.Players))
+	fmt.Fprintf(os.Stderr, "wrote %s (%d sample players)\n", out, len(res.Players))
 	return nil
 }

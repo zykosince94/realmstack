@@ -6,14 +6,14 @@
 // the submission transaction, instead of recomputing best scores from every
 // submission on each read. Top-N is an index scan and a player's rank is one indexed
 // count of better entries (spec 6.6). RebuildBestScores recomputes the table from the
-// submissions, which remain the source of truth.
+// submissions, which remain the source of truth. With Redis configured, ranks come
+// from a sorted-set projection when it is exact for the player (projection.go).
 package leaderboards
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -22,6 +22,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"realmstack-backend/internal/platform"
 )
+
+// MaxScore bounds submitted scores (and, negated, rank scores). Redis stores sorted-set
+// scores as float64, which holds every integer exactly only up to 2^53, so a larger
+// score could be ordered wrongly by the rank projection. Migration 008 adds the same
+// bound as a CHECK constraint.
+const MaxScore = 1<<53 - 1
 
 // Handler serves leaderboard routes.
 type Handler struct{ *platform.Env }
@@ -44,7 +50,7 @@ func (h Handler) Submit(c *gin.Context) {
 	if !platform.Bind(c, &in) {
 		return
 	}
-	if in.Score == math.MinInt64 {
+	if in.Score > MaxScore || in.Score < -MaxScore {
 		platform.Fail(c, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "The score is out of range.")
 		return
 	}
@@ -75,23 +81,64 @@ func (h Handler) Submit(c *gin.Context) {
 		// Replace the best only with a strictly better entry, in exactly the order the
 		// rebuild uses (score, then earlier time, then smaller submission id), so the
 		// maintained table and a rebuild from submissions always agree.
-		_, err = tx.Exec(c, `INSERT INTO leaderboard_best_scores(leaderboard_id,player_id,project_id,environment_id,best_score,rank_score,achieved_at,submission_id)
+		tag, err := tx.Exec(c, `INSERT INTO leaderboard_best_scores(leaderboard_id,player_id,project_id,environment_id,best_score,rank_score,achieved_at,submission_id)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8)
 			ON CONFLICT (leaderboard_id,player_id) DO UPDATE SET best_score=EXCLUDED.best_score,rank_score=EXCLUDED.rank_score,achieved_at=EXCLUDED.achieved_at,submission_id=EXCLUDED.submission_id
 			WHERE (EXCLUDED.rank_score,EXCLUDED.achieved_at,EXCLUDED.submission_id) < (leaderboard_best_scores.rank_score,leaderboard_best_scores.achieved_at,leaderboard_best_scores.submission_id)`,
 			id, p.ID, p.ProjectID, p.EnvironmentID, in.Score, rankScore(direction, in.Score), now, submissionID)
-		return http.StatusCreated, gin.H{"leaderboard_key": key, "score": in.Score, "submitted_at": now}, err
+		if err != nil {
+			return 0, nil, err
+		}
+		// The best changed: queue it for the Redis projection in the same transaction,
+		// so a committed improvement always reaches Redis (retried until it does).
+		if tag.RowsAffected() == 1 && h.Redis != nil {
+			if err = platform.DeferExec(c, tx, `INSERT INTO leaderboard_outbox(leaderboard_id,player_id) VALUES($1,$2)`, id, p.ID); err != nil {
+				return 0, nil, err
+			}
+		}
+		return http.StatusCreated, gin.H{"leaderboard_key": key, "score": in.Score, "submitted_at": now}, nil
 	})
 }
 
 // Get returns the top entries and, for a player token, that player's rank. Reads go
 // to the replica when one is configured: a ranking a moment stale is acceptable.
+//
+// Everything the response needs from PostgreSQL is sent as one pipelined batch: the
+// board lookup, the top-N scan and the player's best entry (or, without Redis, the
+// rank count). The later statements find the board through the same subquery, so
+// they do not wait for the lookup's answer. The load test showed why this matters:
+// under load each round trip queues for CPU on every hop (API, PgBouncer,
+// PostgreSQL), so three sequential round trips made reads slower than writes.
 func (h Handler) Get(c *gin.Context) {
 	scope := platform.GetScope(c)
-	db := h.Reader()
+	key := c.Param("key")
+	limit := 10
+	if n, e := strconv.Atoi(c.DefaultQuery("limit", "10")); e == nil && n > 0 {
+		limit = min(n, 100)
+	}
+	withPlayer := platform.HasPrincipal(c)
+	var playerID string
+	if withPlayer {
+		playerID = platform.GetPrincipal(c).ID
+	}
+	const board = `(SELECT id FROM leaderboard_definitions WHERE project_id=$1 AND environment_id=$2 AND key=$3 AND active)`
+	b := &pgx.Batch{}
+	b.Queue(`SELECT id::text FROM leaderboard_definitions WHERE project_id=$1 AND environment_id=$2 AND key=$3 AND active`, scope.ProjectID, scope.EnvironmentID, key)
+	// Top-N: an index scan on (leaderboard_id, rank_score, achieved_at, player_id).
+	b.Queue(`SELECT b.player_id::text,b.best_score,b.achieved_at,pl.display_name FROM leaderboard_best_scores b JOIN players pl ON pl.id=b.player_id
+		WHERE b.leaderboard_id=`+board+` ORDER BY b.rank_score,b.achieved_at,b.player_id LIMIT $4`, scope.ProjectID, scope.EnvironmentID, key, limit)
+	if withPlayer {
+		if h.Redis != nil {
+			b.Queue(`SELECT best_score,rank_score,achieved_at FROM leaderboard_best_scores WHERE leaderboard_id=`+board+` AND player_id=$4`,
+				scope.ProjectID, scope.EnvironmentID, key, playerID)
+		} else {
+			b.Queue(rankByCount(board, "$4"), scope.ProjectID, scope.EnvironmentID, key, playerID)
+		}
+	}
+	br := h.Reader().SendBatch(c, b)
+	defer br.Close()
 	var boardID string
-	err := db.QueryRow(c, `SELECT id::text FROM leaderboard_definitions WHERE project_id=$1 AND environment_id=$2 AND key=$3 AND active`,
-		scope.ProjectID, scope.EnvironmentID, c.Param("key")).Scan(&boardID)
+	err := br.QueryRow().Scan(&boardID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		platform.NotFound(c)
 		return
@@ -100,13 +147,7 @@ func (h Handler) Get(c *gin.Context) {
 		platform.Internal(c, err)
 		return
 	}
-	limit := 10
-	if n, e := strconv.Atoi(c.DefaultQuery("limit", "10")); e == nil && n > 0 {
-		limit = min(n, 100)
-	}
-	// Top-N: an index scan on (leaderboard_id, rank_score, achieved_at, player_id).
-	rows, err := db.Query(c, `SELECT b.player_id::text,b.best_score,b.achieved_at,pl.display_name FROM leaderboard_best_scores b JOIN players pl ON pl.id=b.player_id
-		WHERE b.leaderboard_id=$1 ORDER BY b.rank_score,b.achieved_at,b.player_id LIMIT $2`, boardID, limit)
+	rows, err := br.Query()
 	if err != nil {
 		platform.Internal(c, err)
 		return
@@ -128,30 +169,58 @@ func (h Handler) Get(c *gin.Context) {
 		platform.Internal(c, err)
 		return
 	}
-	result := gin.H{"key": c.Param("key"), "entries": entries}
-	if platform.HasPrincipal(c) {
-		rank, score, found, err := PlayerRank(c, db, boardID, platform.GetPrincipal(c).ID)
-		if err != nil {
+	result := gin.H{"key": key, "entries": entries}
+	if withPlayer {
+		var rank, score, rs int64
+		var at time.Time
+		found := true
+		if h.Redis != nil {
+			err = br.QueryRow().Scan(&score, &rs, &at)
+		} else {
+			err = br.QueryRow().Scan(&score, &rank)
+		}
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			found = false
+		case err != nil:
 			platform.Internal(c, err)
 			return
+		}
+		if found && h.Redis != nil {
+			// The projection answers only when it holds exactly this best; otherwise
+			// fall back to the indexed count (a second round trip, rare once the
+			// projection is ready).
+			var ok bool
+			if rank, ok = projectedRank(c, h.Redis, boardID, playerID, rs, at); !ok {
+				if err = br.Close(); err != nil {
+					platform.Internal(c, err)
+					return
+				}
+				if err = h.Reader().QueryRow(c, rankByCount("$1", "$2"), boardID, playerID).Scan(&score, &rank); err != nil {
+					platform.Internal(c, err)
+					return
+				}
+			}
 		}
 		if found {
 			result["player_rank"], result["player_score"] = rank, score
 		}
 	}
+	if err = br.Close(); err != nil {
+		platform.Internal(c, err)
+		return
+	}
 	platform.Success(c, http.StatusOK, result)
 }
 
-// PlayerRank is one indexed count of the entries that rank ahead of the player: the
-// row comparison matches the index order, so PostgreSQL reads only that index range.
-func PlayerRank(ctx context.Context, q platform.Querier, boardID, playerID string) (rank, score int64, found bool, err error) {
-	err = q.QueryRow(ctx, `SELECT b.best_score,1+(SELECT count(*) FROM leaderboard_best_scores o WHERE o.leaderboard_id=b.leaderboard_id
+// rankByCount selects a player's best score and rank: one indexed count of the
+// entries ahead of them. The row comparison matches the index order, so PostgreSQL
+// reads only that index range. board and player are SQL expressions (a parameter or
+// the board subquery).
+func rankByCount(board, player string) string {
+	return `SELECT b.best_score,1+(SELECT count(*) FROM leaderboard_best_scores o WHERE o.leaderboard_id=b.leaderboard_id
 		AND (o.rank_score,o.achieved_at,o.player_id) < (b.rank_score,b.achieved_at,b.player_id))
-		FROM leaderboard_best_scores b WHERE b.leaderboard_id=$1 AND b.player_id=$2`, boardID, playerID).Scan(&score, &rank)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, 0, false, nil
-	}
-	return rank, score, err == nil, err
+		FROM leaderboard_best_scores b WHERE b.leaderboard_id=` + board + ` AND b.player_id=` + player
 }
 
 // RebuildBestScores recomputes leaderboard_best_scores from score_submissions with

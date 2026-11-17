@@ -100,7 +100,7 @@ func Spend(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, c
 }
 
 func insertLedger(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, currencyID, operation string, amount, after int64, source, reason, reference string, at time.Time) error {
-	_, err := tx.Exec(ctx, `INSERT INTO economy_transactions(player_id,project_id,environment_id,currency_id,operation,quantity,balance_after,reason,reference,source,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+	err := platform.DeferExec(ctx, tx, `INSERT INTO economy_transactions(player_id,project_id,environment_id,currency_id,operation,quantity,balance_after,reason,reference,source,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 		playerID, scope.ProjectID, scope.EnvironmentID, currencyID, operation, amount, after, reason, reference, source, at)
 	return err
 }

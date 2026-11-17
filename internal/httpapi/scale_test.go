@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -321,5 +322,47 @@ func TestIntegrationPartitionsAndRetention(t *testing.T) {
 	expect(t, grant(), 200)
 	if f.count(`SELECT quantity::int FROM inventory WHERE player_id=$1`, f.playerID) != 3 {
 		t.Fatal("after expiry the key should be treated as new")
+	}
+}
+
+// Scores are bounded to +-MaxScore: the rank projection stores them as float64, which
+// holds integers exactly only up to 2^53. The bound is enforced at the API and by a CHECK
+// constraint, so no stored score can be ordered wrongly by Redis.
+func TestIntegrationScoreRange(t *testing.T) {
+	f := newFixture(t)
+	post := func(score int64) apiResult {
+		return f.playerPost(f.player, "/v1/leaderboards/global/scores", "s-"+platform.RandomID(), map[string]any{"score": score})
+	}
+	for _, score := range []int64{leaderboards.MaxScore + 1, -leaderboards.MaxScore - 1, math.MinInt64, math.MaxInt64} {
+		if r := expect(t, post(score), 422); r.Error.Code != "VALIDATION_ERROR" {
+			t.Fatalf("score %d: code %s", score, r.Error.Code)
+		}
+	}
+	expect(t, post(leaderboards.MaxScore), 201)
+	expect(t, post(-leaderboards.MaxScore), 201)
+	// The constraint is the last line of defence for code that bypasses the handler.
+	if _, err := f.db.Exec(context.Background(), `INSERT INTO score_submissions(leaderboard_id,player_id,project_id,environment_id,score,idempotency_key,request_hash,submitted_at)
+		SELECT leaderboard_id,player_id,project_id,environment_id,$1,'direct','x',submitted_at FROM score_submissions LIMIT 1`, int64(leaderboards.MaxScore)+1); err == nil {
+		t.Fatal("an out-of-range score was stored")
+	}
+}
+
+// A batch locks players in sorted order to avoid deadlocks, and its idempotency keys
+// are per player, so one player written in two spellings (UUIDs are case-insensitive)
+// must be one player: the same entry replays instead of applying twice.
+func TestIntegrationBatchPlayerIDCase(t *testing.T) {
+	f := newFixture(t)
+	expect(t, f.publish(phase5Config()), 201)
+	entry := func(id string) map[string]any {
+		return map[string]any{"type": "grant", "idempotency_key": "case-1", "player_id": id, "item_key": "health_potion", "quantity": 1}
+	}
+	for _, id := range []string{f.playerID, strings.ToUpper(f.playerID)} {
+		res := expect(t, f.server("/v1/server/batch", "k-"+id, map[string]any{"entries": []map[string]any{entry(id)}}), 200).obj(t)
+		if res["applied"].(float64) != 1 {
+			t.Fatalf("batch for %s: %v", id, res)
+		}
+	}
+	if n := f.count(`SELECT quantity::int FROM inventory WHERE player_id=$1`, f.playerID); n != 1 {
+		t.Fatalf("quantity = %d, want 1: the upper-case spelling applied the entry again", n)
 	}
 }

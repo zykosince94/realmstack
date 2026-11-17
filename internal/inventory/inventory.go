@@ -68,7 +68,7 @@ func Grant(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID, i
 	if err != nil {
 		return 0, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO economy_transactions(player_id,project_id,environment_id,item_id,operation,quantity,reason,reference,source,created_at) VALUES($1,$2,$3,$4,'grant',$5,$6,$7,$8,$9)`,
+	err = platform.DeferExec(ctx, tx, `INSERT INTO economy_transactions(player_id,project_id,environment_id,item_id,operation,quantity,reason,reference,source,created_at) VALUES($1,$2,$3,$4,'grant',$5,$6,$7,$8,$9)`,
 		playerID, scope.ProjectID, scope.EnvironmentID, itemID, quantity, reason, reference, source, at)
 	if err != nil || source != "api" {
 		return after, err // only api rows count toward goals, so only they move the totals
@@ -177,7 +177,7 @@ func (h Handler) Consume(c *gin.Context) {
 			unequipped = tag.RowsAffected() > 0
 		}
 		now := h.Now()
-		if _, err = tx.Exec(c, `INSERT INTO economy_transactions(player_id,project_id,environment_id,item_id,operation,quantity,reason,reference,created_at) VALUES($1,$2,$3,$4,'consume',$5,$6,$7,$8)`,
+		if err = platform.DeferExec(c, tx, `INSERT INTO economy_transactions(player_id,project_id,environment_id,item_id,operation,quantity,reason,reference,created_at) VALUES($1,$2,$3,$4,'consume',$5,$6,$7,$8)`,
 			p.ID, p.ProjectID, p.EnvironmentID, itemID, in.Quantity, in.Reason, in.Reference, now); err != nil {
 			return 0, nil, err
 		}

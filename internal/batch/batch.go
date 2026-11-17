@@ -2,14 +2,21 @@
 // one request, so a game server can report a match's results without hundreds of
 // round trips. Each entry runs the normal idempotency algorithm (platform.MutateIn)
 // inside its own savepoint: a failing entry rolls back only itself, a retried batch
-// replays the entries that already succeeded, and entries apply in request order, so
-// two writes for the same player happen in the order they were sent.
+// replays the entries that already succeeded, and each player's entries apply in
+// request order, so two writes for the same player happen in the order they were sent.
+//
+// Entries are applied grouped by player ID (a stable sort), not in raw request order:
+// a batch holds its row locks until commit, and the load test showed two concurrent
+// batches locking random players in opposite orders and deadlocking. Locking players in
+// one global order removes that cycle. Results are still reported in request order.
 package batch
 
 import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
@@ -72,15 +79,27 @@ func (h Handler) Write(c *gin.Context) {
 			return
 		}
 	}
-	tx, err := h.DB.Begin(c)
+	raw, err := h.DB.Begin(c)
 	if err != nil {
 		platform.Internal(c, err)
 		return
 	}
-	defer tx.Rollback(c)
+	defer raw.Rollback(c)
+	tx := platform.Pipelined(raw)
 	results := make([]gin.H, len(in.Entries))
 	applied := 0
-	for i, e := range in.Entries {
+	// UUIDs may arrive in either case; the lock order below and the idempotency keys
+	// must see one spelling per player.
+	for i := range in.Entries {
+		in.Entries[i].PlayerID = strings.ToLower(in.Entries[i].PlayerID)
+	}
+	order := make([]int, len(in.Entries))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return in.Entries[order[a]].PlayerID < in.Entries[order[b]].PlayerID })
+	for _, i := range order {
+		e := in.Entries[i]
 		status, body, err := h.apply(c, tx, actor, e)
 		res := gin.H{"index": i, "idempotency_key": e.IdempotencyKey, "type": e.Type, "status": status}
 		if err != nil {
@@ -117,18 +136,30 @@ func (h Handler) apply(c *gin.Context, tx pgx.Tx, actor platform.Principal, e En
 	}
 	target := actor
 	target.ID = e.PlayerID
-	sp, err := tx.Begin(c) // a SAVEPOINT inside the batch transaction
-	if err != nil {
+	// Each entry runs inside its own savepoint. SAVEPOINT and RELEASE are queued, not
+	// sent: SAVEPOINT travels with the entry's first statement (the idempotency lock)
+	// and RELEASE with the next entry's or the commit. A batch holds its players' row
+	// locks until commit, and the load test showed single writes queueing behind
+	// batches; two fewer round trips per entry shortens that hold by about a quarter.
+	if err := platform.DeferExec(c, tx, `SAVEPOINT batch_entry`); err != nil {
 		return 0, nil, err
 	}
 	payload := e
 	payload.IdempotencyKey = "" // the key identifies the request; it is not part of it
-	status, body, err := platform.MutateIn(c, sp, target, e.IdempotencyKey, "/v1/server/batch#"+e.Type, payload, fn)
+	status, body, err := platform.MutateIn(c, tx, target, e.IdempotencyKey, "/v1/server/batch#"+e.Type, payload, fn)
 	if err != nil {
-		_ = sp.Rollback(c) // ROLLBACK TO SAVEPOINT: only this entry is undone
+		// Only this entry is undone; this also clears an error state the failed
+		// statement left on the transaction. The rollback is sent now, so a database
+		// error here (the connection is gone) fails the batch instead of being hidden.
+		if _, rerr := tx.Exec(c, `ROLLBACK TO SAVEPOINT batch_entry`); rerr != nil {
+			return 0, nil, rerr
+		}
+		if rerr := platform.DeferExec(c, tx, `RELEASE SAVEPOINT batch_entry`); rerr != nil {
+			return 0, nil, rerr
+		}
 		return 0, nil, err
 	}
-	return status, body, sp.Commit(c) // RELEASE SAVEPOINT
+	return status, body, platform.DeferExec(c, tx, `RELEASE SAVEPOINT batch_entry`)
 }
 
 // work returns the mutation for an entry, reusing the same transaction functions as
@@ -171,7 +202,8 @@ func (h Handler) work(c *gin.Context, e Entry) (platform.MutateFunc, bool) {
 }
 
 // classify turns database errors into entry results. A deadlock or serialization
-// failure (two batches touching the same players in different orders) is retryable.
+// failure is retryable; player-ordered entries make deadlocks between batches unlikely,
+// but other transactions can still form a cycle with a batch.
 func classify(err error) *platform.Error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && (pgErr.Code == "40P01" || pgErr.Code == "40001") {

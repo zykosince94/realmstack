@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"realmstack-backend/internal/ai"
 	"realmstack-backend/internal/demo"
 	"realmstack-backend/internal/httpapi"
@@ -26,8 +27,12 @@ func main() {
 	slog.SetDefault(logger)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// DATABASE_URL serves requests and may point at PgBouncer in transaction mode (add
-	// default_query_exec_mode=exec and pool_max_conns to it). DATABASE_DIRECT_URL, when
+	// DATABASE_URL serves requests and may point at PgBouncer in transaction mode. Keep
+	// pgx's default (cached prepared statements) and set max_prepared_statements on
+	// PgBouncer 1.21+, which tracks them per server connection. Do not use
+	// default_query_exec_mode=exec or simple_protocol: those encode arguments by Go type
+	// without asking the server, so a []byte JSON argument is sent as bytea and every
+	// json/jsonb write fails. DATABASE_DIRECT_URL, when
 	// set, reaches PostgreSQL directly: migrations hold a session advisory lock, which a
 	// transaction-mode pooler cannot keep, and maintenance runs there too.
 	pool := connect(ctx, logger, "DATABASE_URL", env("DATABASE_URL", "postgres://realmstack:realmstack@localhost:5432/realmstack?sslmode=disable"))
@@ -98,6 +103,22 @@ func main() {
 	}
 	api := httpapi.New(pool, cfg, logger)
 	api.Env.ReadDB = replica // nil without a replica: reads use the primary
+	// REDIS_URL enables the leaderboard rank projection. Redis is optional and never
+	// the source of truth: when it is unreachable, ranks fall back to PostgreSQL and
+	// the outbox keeps the changes until it returns, so it does not block startup.
+	if url := os.Getenv("REDIS_URL"); url != "" {
+		opts, err := redis.ParseURL(url)
+		if err != nil {
+			logger.Error("invalid REDIS_URL", "error", err)
+			os.Exit(1)
+		}
+		rdb := redis.NewClient(opts)
+		defer rdb.Close()
+		if err = rdb.Ping(ctx).Err(); err != nil {
+			logger.Warn("redis unreachable at startup; ranks use PostgreSQL until it is", "error", err)
+		}
+		api.Env.Redis = rdb
+	}
 	srv := api.HTTPServer(env("HTTP_ADDR", ":8080"))
 	background, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()

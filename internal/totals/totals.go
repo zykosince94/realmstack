@@ -49,7 +49,7 @@ func Add(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerID stri
 	for i, d := range deltas {
 		metrics[i], amounts[i] = d.Metric, d.Amount
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO player_goal_totals(player_id,project_id,environment_id,metric,total,updated_at)
+	err := platform.DeferExec(ctx, tx, `INSERT INTO player_goal_totals(player_id,project_id,environment_id,metric,total,updated_at)
 		SELECT $1,$2,$3,m.metric,m.amount,$6 FROM unnest($4::text[],$5::bigint[]) WITH ORDINALITY AS m(metric,amount,ord) ORDER BY m.ord
 		ON CONFLICT (player_id,metric) DO UPDATE SET total=player_goal_totals.total+EXCLUDED.total,updated_at=EXCLUDED.updated_at`,
 		playerID, scope.ProjectID, scope.EnvironmentID, metrics, amounts, at)

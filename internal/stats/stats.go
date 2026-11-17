@@ -80,7 +80,7 @@ func IncrementTx(ctx context.Context, tx pgx.Tx, scope platform.Principal, playe
 	if err != nil {
 		return 0, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO stat_transactions(player_id,project_id,environment_id,stat_definition_id,operation,amount,reason,reference,created_at) VALUES($1,$2,$3,$4,'increment',$5,$6,$7,$8)`,
+	if err = platform.DeferExec(ctx, tx, `INSERT INTO stat_transactions(player_id,project_id,environment_id,stat_definition_id,operation,amount,reason,reference,created_at) VALUES($1,$2,$3,$4,'increment',$5,$6,$7,$8)`,
 		playerID, scope.ProjectID, scope.EnvironmentID, id, amount, reason, reference, at); err != nil {
 		return 0, err
 	}
@@ -120,7 +120,7 @@ func SetFlagTx(ctx context.Context, tx pgx.Tx, scope platform.Principal, playerI
 	if err != nil || tag.RowsAffected() == 0 {
 		return false, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO stat_transactions(player_id,project_id,environment_id,stat_definition_id,operation,amount,reason,reference,created_at) VALUES($1,$2,$3,$4,'set_flag',1,$5,$6,$7)`,
+	err = platform.DeferExec(ctx, tx, `INSERT INTO stat_transactions(player_id,project_id,environment_id,stat_definition_id,operation,amount,reason,reference,created_at) VALUES($1,$2,$3,$4,'set_flag',1,$5,$6,$7)`,
 		playerID, scope.ProjectID, scope.EnvironmentID, id, reason, reference, at)
 	return err == nil, err
 }
