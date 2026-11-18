@@ -6,8 +6,9 @@ import (
 	"time"
 )
 
-// Provider is one AI vendor behind the assistant. Phase 7 ships OpenAI; another vendor
-// is another implementation. Tests use a fake, so no test ever calls a real API.
+// Provider is one AI vendor behind the assistant: OpenAI (Responses API) or any
+// OpenAI-compatible service (Chat Completions at a user-chosen base URL). Tests use a
+// fake, so no test ever calls a real API.
 type Provider interface {
 	// Generate returns JSON that matches req.Schema.
 	Generate(ctx context.Context, req Request) (Result, error)
@@ -37,6 +38,7 @@ type Settings struct {
 	Provider string
 	Model    string
 	APIKey   string
+	BaseURL  string // openai_compatible only
 }
 
 // Error codes the assistant reports. They are stable API values.

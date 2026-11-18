@@ -41,6 +41,25 @@ func PurgeIdempotency(ctx context.Context, db *pgxpool.Pool, batchSize int) (int
 	}
 }
 
+// PurgeRefreshTokens deletes player and dashboard refresh tokens that expired more than
+// a day ago. Revoked but unexpired rows stay: reuse detection needs them until they
+// would have expired anyway. Without this the tables grow by one row per refresh.
+func PurgeRefreshTokens(ctx context.Context, db *pgxpool.Pool) (int64, error) {
+	var total int64
+	for _, table := range []string{"refresh_tokens", "dashboard_refresh_tokens"} {
+		// Rotation links rows (replaced_by), so unlink the expired ones before deleting.
+		if _, err := db.Exec(ctx, `UPDATE `+table+` SET replaced_by=NULL WHERE replaced_by IN (SELECT id FROM `+table+` WHERE expires_at < now() - interval '1 day')`); err != nil {
+			return total, err
+		}
+		tag, err := db.Exec(ctx, `DELETE FROM `+table+` WHERE expires_at < now() - interval '1 day'`)
+		if err != nil {
+			return total, err
+		}
+		total += tag.RowsAffected()
+	}
+	return total, nil
+}
+
 // exclusive runs fn only if this instance wins the named lock for this run.
 func exclusive(ctx context.Context, db *pgxpool.Pool, name string, fn func() error) (bool, error) {
 	tx, err := db.Begin(ctx)
@@ -77,6 +96,13 @@ func RunOnce(ctx context.Context, db *pgxpool.Pool, log *slog.Logger) {
 		n, err := PurgeIdempotency(ctx, db, 5000)
 		if n > 0 {
 			log.Info("purged expired idempotency records", "count", n)
+		}
+		return err
+	})
+	run("refresh-tokens", func() error {
+		n, err := PurgeRefreshTokens(ctx, db)
+		if n > 0 {
+			log.Info("purged expired refresh tokens", "count", n)
 		}
 		return err
 	})

@@ -28,7 +28,7 @@ func NewOpenAI(s Settings) (Provider, error) { return newOpenAI(s) }
 
 // newOpenAI accepts extra client options; tests point it at a local server.
 func newOpenAI(s Settings, opts ...option.RequestOption) (*OpenAIProvider, error) {
-	if s.Provider != "openai" {
+	if s.Provider != ProviderOpenAI {
 		return nil, fmt.Errorf("unsupported provider %q", s.Provider)
 	}
 	// The SDK retries connection errors, 408, 409, 429 and 5xx twice by default; the
@@ -109,6 +109,8 @@ func translate(ctx context.Context, err error) error {
 		return &ProviderError{Code: CodeKeyRejected, Message: "The provider rejected the API key. Check or replace it in AI settings."}
 	case status == http.StatusNotFound:
 		return &ProviderError{Code: CodeModelNotFound, Message: "The provider does not offer that model to this key."}
+	case status == http.StatusPaymentRequired:
+		return &ProviderError{Code: CodeRequestRejected, Message: "The provider reports insufficient credit or a billing problem for this key."}
 	case status == http.StatusTooManyRequests:
 		return &ProviderError{Code: CodeRateLimited, Message: "The provider's rate limit or quota for this key was reached.", RetryAfter: retryAfter(apiErr.Response)}
 	case status >= 500:

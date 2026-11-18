@@ -86,7 +86,7 @@ func New(db *pgxpool.Pool, cfg Config, logger *slog.Logger) *Server {
 	}
 	gin.SetMode(gin.ReleaseMode)
 	s := &Server{
-		Env:     &platform.Env{DB: db, Log: logger, JWTSecret: cfg.JWTSecret, AccessTTL: cfg.AccessTTL, RefreshTTL: cfg.RefreshTTL, Now: time.Now},
+		Env:     &platform.Env{DB: db, Log: logger, JWTSecret: cfg.JWTSecret, AccessTTL: cfg.AccessTTL, RefreshTTL: cfg.RefreshTTL, Now: time.Now, SecureCookies: cfg.Env != "local"},
 		cfg:     cfg,
 		router:  gin.New(),
 		limiter: newRateLimiter(cfg.AuthRateLimit, time.Minute),

@@ -121,6 +121,10 @@ func Seed(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error {
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}
+	// The AI assistant's demo history (once per environment; see ai.go).
+	if err = SeedAIGenerations(ctx, db); err != nil {
+		return fmt.Errorf("seed AI demo generations: %w", err)
+	}
 	if logger != nil {
 		logger.Warn("LOCAL DEMO ENABLED: seeded demo accounts and server credential", "admin_email", DemoAdminEmail, "player_email", DemoPlayerEmail, "public_environment", DemoPublicEnvironment)
 	}

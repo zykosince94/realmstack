@@ -12,6 +12,7 @@ import (
 	"realmstack-backend/internal/inventory"
 	"realmstack-backend/internal/leaderboards"
 	"realmstack-backend/internal/platform"
+	"realmstack-backend/internal/playeradmin"
 	"realmstack-backend/internal/players"
 	"realmstack-backend/internal/progression"
 	"realmstack-backend/internal/projects"
@@ -27,6 +28,7 @@ func (s *Server) routes() {
 	projectsH := projects.Handler{Env: env}
 	catalogH := catalog.Handler{Env: env}
 	playersH := players.Handler{Env: env}
+	playerAdminH := playeradmin.Handler{Env: env}
 	inventoryH := inventory.Handler{Env: env}
 	economyH := economy.Handler{Env: env}
 	progressionH := progression.Handler{Env: env}
@@ -43,6 +45,9 @@ func (s *Server) routes() {
 	// Dashboard authentication (public, rate limited).
 	v.POST("/auth/register", s.rateLimit(), authH.Register)
 	v.POST("/auth/login", s.rateLimit(), authH.Login)
+	// Session resume and sign-out use the httpOnly refresh cookie, not a bearer token.
+	v.POST("/auth/refresh", s.rateLimit(), authH.Refresh)
+	v.POST("/auth/logout", authH.Logout)
 
 	// Dashboard: projects owned by the signed-in user.
 	user := v.Group("", s.userAuth())
@@ -63,6 +68,38 @@ func (s *Server) routes() {
 
 	// Dashboard: one owned environment.
 	environment := user.Group("/projects/:projectId/environments/:envId", projectsH.RequireOwnedEnvironment())
+
+	// Players of an owned environment, read-only. The detail routes reuse the game's own
+	// read handlers; Target narrows the request to one player of this environment.
+	environment.GET("/players", playerAdminH.List)
+	adminPlayer := environment.Group("/players/:playerId", playerAdminH.Target())
+	adminPlayer.GET("", playerAdminH.Profile)
+	adminPlayer.GET("/inventory", inventoryH.List)
+	adminPlayer.GET("/currency", economyH.Balances)
+	adminPlayer.GET("/transactions", economyH.Transactions)
+	adminPlayer.GET("/progression", progressionH.Get)
+	adminPlayer.GET("/stats", statsH.ForPlayer)
+	adminPlayer.GET("/achievements", achievementsH.ForPlayer)
+	adminPlayer.GET("/quests", questsH.ForPlayer)
+	// Player management: an admin performs, on behalf of one player, the actions a game
+	// client or server would. They are the same handlers and transaction functions (so
+	// the same rules, ledgers and goal evaluation), reached with a dashboard token and
+	// an Idempotency-Key. Claims use the server variants, so an admin can claim a goal
+	// whatever its claim policy.
+	adminPlayer.POST("/items/grant", inventoryH.GrantHandler)
+	adminPlayer.POST("/inventory/consume", inventoryH.Consume)
+	adminPlayer.POST("/inventory/equip", inventoryH.Equip)
+	adminPlayer.POST("/inventory/unequip", inventoryH.Unequip)
+	adminPlayer.POST("/currency/credit", economyH.CreditHandler)
+	adminPlayer.POST("/currency/spend", economyH.SpendHandler)
+	adminPlayer.POST("/xp/award", progressionH.AwardHandler)
+	adminPlayer.POST("/stats/:statKey/increment", statsH.Increment)
+	adminPlayer.POST("/flags/:flagKey/set", statsH.SetFlag)
+	adminPlayer.POST("/achievements/:key/claim", achievementsH.ClaimForPlayer)
+	adminPlayer.POST("/quests/:key/accept", questsH.AcceptForPlayer)
+	adminPlayer.POST("/quests/:key/abandon", questsH.AbandonMine)
+	adminPlayer.POST("/quests/:key/claim", questsH.ClaimForPlayer)
+	adminPlayer.POST("/leaderboards/:key/scores", leaderboardsH.Submit)
 	environment.GET("/credentials", projectsH.ListCredentials)
 	environment.POST("/credentials", projectsH.IssueCredential)
 	environment.GET("/configurations/draft", catalogH.GetDraft)

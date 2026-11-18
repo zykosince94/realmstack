@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -27,6 +28,10 @@ type Config struct {
 	MaxOutputTokens int64         // output token cap per call
 	PerMinute       int           // generations a user may start per minute
 	MaxRunning      int           // generations a user may have in flight
+	// AllowPrivateURLs (AI_ALLOW_PRIVATE_URLS) lets an OpenAI-compatible base URL be http
+	// or point at a private or local address, for a local model server. Off by default:
+	// users choose that URL, so the server would otherwise call any internal address.
+	AllowPrivateURLs bool
 }
 
 // Service holds the assistant's state. Handler methods are mounted by httpapi.
@@ -60,7 +65,8 @@ func NewService(env *platform.Env, cfg Config) (*Service, error) {
 	if cfg.MaxRunning <= 0 {
 		cfg.MaxRunning = 2
 	}
-	s := &Service{Env: env, cfg: cfg, NewProvider: NewOpenAI, starts: map[string][]time.Time{}}
+	s := &Service{Env: env, cfg: cfg, starts: map[string][]time.Time{}}
+	s.NewProvider = s.defaultFactory
 	if cfg.EncryptionKey != "" {
 		sealer, err := NewSealer(cfg.EncryptionKey)
 		if err != nil {
@@ -69,6 +75,17 @@ func NewService(env *platform.Env, cfg Config) (*Service, error) {
 		s.sealer = sealer
 	}
 	return s, nil
+}
+
+// defaultFactory picks the adapter for the user's provider.
+func (s *Service) defaultFactory(st Settings) (Provider, error) {
+	switch st.Provider {
+	case ProviderOpenAI:
+		return NewOpenAI(st)
+	case ProviderCompatible:
+		return NewCompatible(st, s.cfg.AllowPrivateURLs)
+	}
+	return nil, fmt.Errorf("unsupported provider %q", st.Provider)
 }
 
 // Enabled reports whether the assistant is configured on this deployment.
@@ -101,22 +118,31 @@ func (s *Service) RequireEnabled() gin.HandlerFunc {
 
 // --- Settings ---
 
-var modelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$`)
+// Model IDs: OpenAI's are plain; compatible services also use vendor prefixes and
+// variants such as "nvidia/nemotron-3.5-super-vl:free" or "meta-llama/llama-3.3-70b@q8".
+var (
+	modelPattern           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$`)
+	compatibleModelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$`)
+)
 
 // Providers lists the supported providers.
-var Providers = []string{"openai"}
+var Providers = []string{ProviderOpenAI, ProviderCompatible}
 
 func (s *Service) settingsView(c *gin.Context, userID string) (gin.H, error) {
-	var provider, model, last4 string
+	var provider, model, last4, baseURL string
 	var updated time.Time
-	err := s.DB.QueryRow(c, `SELECT provider,model,key_last4,updated_at FROM ai_provider_settings WHERE user_id=$1`, userID).Scan(&provider, &model, &last4, &updated)
+	err := s.DB.QueryRow(c, `SELECT provider,model,key_last4,base_url,updated_at FROM ai_provider_settings WHERE user_id=$1`, userID).Scan(&provider, &model, &last4, &baseURL, &updated)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return gin.H{"configured": false, "provider": nil, "model": nil, "key_last4": nil, "updated_at": nil, "providers": Providers}, nil
+		return gin.H{"configured": false, "provider": nil, "model": nil, "key_last4": nil, "base_url": nil, "updated_at": nil, "providers": Providers}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return gin.H{"configured": true, "provider": provider, "model": model, "key_last4": last4, "updated_at": updated, "providers": Providers}, nil
+	var base any // null for OpenAI, which has no configurable endpoint
+	if baseURL != "" {
+		base = baseURL
+	}
+	return gin.H{"configured": true, "provider": provider, "model": model, "key_last4": last4, "base_url": base, "updated_at": updated, "providers": Providers}, nil
 }
 
 // GetSettings shows the signed-in user's provider settings. The key itself is never
@@ -130,25 +156,44 @@ func (s *Service) GetSettings(c *gin.Context) {
 	platform.Success(c, http.StatusOK, view)
 }
 
-// PutSettings stores provider settings. api_key may be omitted to change only the
-// model of an existing setting.
+// PutSettings stores provider settings, but only after the provider has accepted the key
+// and model (Provider.Check); if it has not, nothing is saved and the error says why.
+// api_key may be omitted to change only the model of an existing setting, but never the
+// destination: a stored key is only ever sent to the provider and base URL it was saved
+// with, so changing either requires entering the key again. Otherwise a hijacked
+// dashboard session could point a victim's stored key at an attacker's server.
 func (s *Service) PutSettings(c *gin.Context) {
 	var in struct {
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
 		APIKey   string `json:"api_key"`
+		BaseURL  string `json:"base_url"`
 	}
 	if !platform.Bind(c, &in) {
 		return
 	}
 	userID := platform.GetPrincipal(c).ID
-	in.Model, in.APIKey = strings.TrimSpace(in.Model), strings.TrimSpace(in.APIKey)
+	in.Model, in.APIKey, in.BaseURL = strings.TrimSpace(in.Model), strings.TrimSpace(in.APIKey), strings.TrimSpace(in.BaseURL)
 	var errs platform.FieldErrors
-	if in.Provider != "openai" {
+	switch in.Provider {
+	case ProviderOpenAI:
+		if !modelPattern.MatchString(in.Model) {
+			errs.Add("model", "must be a model ID such as gpt-5.5")
+		}
+		if in.BaseURL != "" {
+			errs.Add("base_url", "is only used with the %s provider", ProviderCompatible)
+		}
+	case ProviderCompatible:
+		if !compatibleModelPattern.MatchString(in.Model) {
+			errs.Add("model", "must be a model ID such as meta-llama/llama-3.3-70b-instruct")
+		}
+		if base, err := ValidateBaseURL(in.BaseURL, s.cfg.AllowPrivateURLs); err != nil {
+			errs.Add("base_url", "%s", err.Error())
+		} else {
+			in.BaseURL = base
+		}
+	default:
 		errs.Add("provider", "must be one of %s", strings.Join(Providers, ", "))
-	}
-	if !modelPattern.MatchString(in.Model) {
-		errs.Add("model", "must be a model ID such as gpt-5.5")
 	}
 	if in.APIKey != "" && (len(in.APIKey) < 20 || len(in.APIKey) > 400 || strings.ContainsAny(in.APIKey, " \t\r\n")) {
 		errs.Add("api_key", "does not look like an API key")
@@ -157,32 +202,57 @@ func (s *Service) PutSettings(c *gin.Context) {
 		platform.Respond(c, platform.Invalid("VALIDATION_ERROR", "The AI settings are invalid.", errs))
 		return
 	}
+	// The key to check: the one just typed, or the stored one, which is only reusable for
+	// the destination it was saved with.
+	key := in.APIKey
+	if key == "" {
+		stored, err := s.loadSettings(c, userID)
+		switch {
+		case err == errNotConfigured:
+			errs.Add("api_key", "is required the first time")
+		case err != nil:
+			platform.Respond(c, err)
+			return
+		case stored.Provider != in.Provider || stored.BaseURL != in.BaseURL:
+			errs.Add("api_key", "is required when the provider or base URL changes")
+		default:
+			key = stored.APIKey
+		}
+		if len(errs) > 0 {
+			platform.Respond(c, platform.Invalid("VALIDATION_ERROR", "The AI settings are invalid.", errs))
+			return
+		}
+	}
+	// Check the key and model with the provider before storing anything, so a typo can
+	// never replace a working setup (and the user hears about it now, not on the first
+	// generation). If the check fails, nothing is saved.
+	provider, err := s.NewProvider(Settings{Provider: in.Provider, Model: in.Model, APIKey: key, BaseURL: in.BaseURL})
+	if err != nil {
+		platform.Respond(c, platform.Invalid("VALIDATION_ERROR", "The AI settings are invalid.", []platform.FieldError{{Field: "base_url", Message: err.Error()}}))
+		return
+	}
+	checkCtx, cancel := context.WithTimeout(c, 20*time.Second)
+	defer cancel()
+	if err = provider.Check(checkCtx); err != nil {
+		respondProvider(c, err)
+		return
+	}
 	if in.APIKey == "" {
-		tag, err := s.DB.Exec(c, `UPDATE ai_provider_settings SET provider=$2,model=$3,updated_at=now() WHERE user_id=$1`, userID, in.Provider, in.Model)
-		if err != nil {
-			platform.Internal(c, err)
-			return
-		}
-		if tag.RowsAffected() == 0 {
-			platform.Respond(c, platform.Invalid("VALIDATION_ERROR", "The AI settings are invalid.", []platform.FieldError{{Field: "api_key", Message: "is required the first time"}}))
-			return
-		}
+		_, err = s.DB.Exec(c, `UPDATE ai_provider_settings SET model=$2,updated_at=now() WHERE user_id=$1 AND provider=$3 AND base_url=$4`, userID, in.Model, in.Provider, in.BaseURL)
 	} else {
 		// The user ID is bound into the ciphertext, so a key copied onto another user's
 		// row does not decrypt.
-		sealed, nonce, err := s.sealer.Seal(in.APIKey, []byte(userID))
-		if err != nil {
-			platform.Internal(c, err)
-			return
+		var sealed, nonce []byte
+		if sealed, nonce, err = s.sealer.Seal(in.APIKey, []byte(userID)); err == nil {
+			_, err = s.DB.Exec(c, `INSERT INTO ai_provider_settings(user_id,provider,model,base_url,encrypted_api_key,key_nonce,key_version,key_last4) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+				ON CONFLICT(user_id) DO UPDATE SET provider=EXCLUDED.provider,model=EXCLUDED.model,base_url=EXCLUDED.base_url,encrypted_api_key=EXCLUDED.encrypted_api_key,
+				key_nonce=EXCLUDED.key_nonce,key_version=EXCLUDED.key_version,key_last4=EXCLUDED.key_last4,updated_at=now()`,
+				userID, in.Provider, in.Model, in.BaseURL, sealed, nonce, s.sealer.Version, in.APIKey[len(in.APIKey)-4:])
 		}
-		_, err = s.DB.Exec(c, `INSERT INTO ai_provider_settings(user_id,provider,model,encrypted_api_key,key_nonce,key_version,key_last4) VALUES($1,$2,$3,$4,$5,$6,$7)
-			ON CONFLICT(user_id) DO UPDATE SET provider=EXCLUDED.provider,model=EXCLUDED.model,encrypted_api_key=EXCLUDED.encrypted_api_key,
-			key_nonce=EXCLUDED.key_nonce,key_version=EXCLUDED.key_version,key_last4=EXCLUDED.key_last4,updated_at=now()`,
-			userID, in.Provider, in.Model, sealed, nonce, s.sealer.Version, in.APIKey[len(in.APIKey)-4:])
-		if err != nil {
-			platform.Internal(c, err)
-			return
-		}
+	}
+	if err != nil {
+		platform.Internal(c, err)
+		return
 	}
 	view, err := s.settingsView(c, userID)
 	if err != nil {
@@ -208,7 +278,7 @@ var errNotConfigured = &platform.Error{Status: http.StatusConflict, Code: "AI_NO
 func (s *Service) loadSettings(ctx context.Context, userID string) (Settings, error) {
 	var st Settings
 	var sealed, nonce []byte
-	err := s.DB.QueryRow(ctx, `SELECT provider,model,encrypted_api_key,key_nonce FROM ai_provider_settings WHERE user_id=$1`, userID).Scan(&st.Provider, &st.Model, &sealed, &nonce)
+	err := s.DB.QueryRow(ctx, `SELECT provider,model,base_url,encrypted_api_key,key_nonce FROM ai_provider_settings WHERE user_id=$1`, userID).Scan(&st.Provider, &st.Model, &st.BaseURL, &sealed, &nonce)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return st, errNotConfigured
 	}
@@ -278,6 +348,10 @@ func scanGeneration(row pgx.Row) (gin.H, error) {
 	}
 	if len(output) > 0 {
 		_ = json.Unmarshal(output, &outcome)
+	}
+	// Rows written before the nil-slice fix hold JSON null; the contract is an array.
+	if len(errs) == 0 || string(errs) == "null" {
+		errs = []byte("[]")
 	}
 	var failure any
 	if code != "" {
@@ -453,6 +527,11 @@ func (s *Service) run(j job) {
 		if len(fieldErrs) > 0 {
 			status = "invalid"
 		}
+	}
+	// A valid proposal comes back with a nil slice, which marshals to null; the API
+	// promises an array (the dashboard reads errors.length), so store [] instead.
+	if fieldErrs == nil {
+		fieldErrs = []platform.FieldError{}
 	}
 	output, _ := json.Marshal(outcome)
 	errsJSON, _ := json.Marshal(fieldErrs)

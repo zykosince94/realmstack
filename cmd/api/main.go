@@ -75,6 +75,8 @@ func main() {
 			MaxOutputTokens: int64(httpapi.ParseIntEnv("AI_MAX_OUTPUT_TOKENS", 32000)),
 			PerMinute:       httpapi.ParseIntEnv("AI_GENERATIONS_PER_MINUTE", 6),
 			MaxRunning:      httpapi.ParseIntEnv("AI_MAX_RUNNING_PER_USER", 2),
+			// Off by default: users choose OpenAI-compatible base URLs (SSRF).
+			AllowPrivateURLs: os.Getenv("AI_ALLOW_PRIVATE_URLS") == "true",
 		},
 	}
 	// AI is optional: without a key the assistant is off and everything else works.

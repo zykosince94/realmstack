@@ -179,6 +179,14 @@ func TestIntegrationPhase7ExitCriterion(t *testing.T) {
 	// Valid: nothing changes until a person applies it, and applying edits only the draft.
 	fake.json = validItems
 	good := f.generate("items", map[string]any{"brief": "a wizard game", "count": 1}, "")
+	// errors is always an array, empty for a valid proposal: the dashboard reads its
+	// length (a null here once crashed the review screen).
+	if errs, ok := good["errors"].([]any); !ok || len(errs) != 0 {
+		t.Fatalf("valid generation errors = %#v, want []", good["errors"])
+	}
+	if f.count(`SELECT count(*) FROM ai_generations WHERE jsonb_typeof(errors) <> 'array'`) != 0 {
+		t.Fatal("a generation stored errors that are not an array")
+	}
 	if good["status"] != "valid" || good["appliable"] != true || !strings.Contains(good["notes"].(string), "One wand") {
 		t.Fatalf("valid generation: %v", good)
 	}
@@ -353,4 +361,109 @@ func TestIntegrationConfigurationRollback(t *testing.T) {
 	}
 	expect(t, call(t, f.h, "POST", f.envPath("/configurations/versions/99/rollback"), nil, bearer(f.userToken)), 404)
 	expect(t, call(t, f.h, "POST", f.envPath("/configurations/versions/abc/rollback"), nil, bearer(f.userToken)), 404)
+}
+
+// OpenAI-compatible providers: any Chat Completions service at a base URL the user
+// chooses. The URL is user-supplied, so it is validated (https, no private addresses),
+// and a stored key can only be kept for the destination it was saved with.
+func TestIntegrationAICompatibleSettings(t *testing.T) {
+	f := newFixture(t)
+	_, fake := f.withAI(ai.Config{})
+	put := func(body map[string]any) apiResult {
+		return call(t, f.h, "PUT", "/v1/ai/settings", body, bearer(f.userToken))
+	}
+	const (
+		base   = "https://openrouter.ai/api/v1"
+		model  = "nvidia/nemotron-3.5-super-vl:free"
+		secret = "sk-or-v1-THISISASECRETKEYVALUE5432"
+	)
+	field := func(r apiResult, name string) bool { return strings.Contains(r.raw, `"`+name+`"`) }
+
+	// Validation: each rule names its field.
+	for name, c := range map[string]struct {
+		body  map[string]any
+		field string
+	}{
+		"slash model on openai": {map[string]any{"provider": "openai", "model": model, "api_key": secret}, "model"},
+		"no base url":           {map[string]any{"provider": "openai_compatible", "model": model, "api_key": secret}, "base_url"},
+		"http":                  {map[string]any{"provider": "openai_compatible", "model": model, "api_key": secret, "base_url": "http://openrouter.ai/api/v1"}, "base_url"},
+		"private ip":            {map[string]any{"provider": "openai_compatible", "model": model, "api_key": secret, "base_url": "https://169.254.169.254/latest"}, "base_url"},
+		"localhost":             {map[string]any{"provider": "openai_compatible", "model": model, "api_key": secret, "base_url": "https://localhost/v1"}, "base_url"},
+		"credentials in url":    {map[string]any{"provider": "openai_compatible", "model": model, "api_key": secret, "base_url": "https://u:p@openrouter.ai/v1"}, "base_url"},
+		"base url on openai":    {map[string]any{"provider": "openai", "model": "gpt-5.5", "api_key": secret, "base_url": base}, "base_url"},
+		"bad model":             {map[string]any{"provider": "openai_compatible", "model": "bad model!", "api_key": secret, "base_url": base}, "model"},
+	} {
+		if r := expect(t, put(c.body), 422); !field(r, c.field) {
+			t.Errorf("%s: 422 does not name %s: %s", name, c.field, r.raw)
+		}
+	}
+
+	// A valid compatible setting; the trailing slash is normalised away.
+	saved := expect(t, put(map[string]any{"provider": "openai_compatible", "model": model, "api_key": secret, "base_url": base + "/"}), 200)
+	got := saved.obj(t)
+	if got["provider"] != "openai_compatible" || got["model"] != model || got["base_url"] != base || got["key_last4"] != "5432" || strings.Contains(saved.raw, "THISISASECRET") {
+		t.Fatalf("saved settings: %s", saved.raw)
+	}
+	if providers := got["providers"].([]any); len(providers) != 2 {
+		t.Fatalf("providers: %v", providers)
+	}
+
+	// The same destination may change its model without re-entering the key.
+	expect(t, put(map[string]any{"provider": "openai_compatible", "model": "meta-llama/llama-3.3-70b-instruct", "base_url": base}), 200)
+	// A different base URL or provider needs the key again: otherwise a hijacked session
+	// could aim a stored key at a server it controls.
+	for name, body := range map[string]map[string]any{
+		"new base url": {"provider": "openai_compatible", "model": model, "base_url": "https://attacker.example/v1"},
+		"to openai":    {"provider": "openai", "model": "gpt-5.5"},
+	} {
+		r := expect(t, put(body), 422)
+		if !field(r, "api_key") || !strings.Contains(r.raw, "changes") {
+			t.Errorf("%s: %s", name, r.raw)
+		}
+	}
+	if got := expect(t, call(t, f.h, "GET", "/v1/ai/settings", nil, bearer(f.userToken)), 200).obj(t); got["base_url"] != base || got["model"] != "meta-llama/llama-3.3-70b-instruct" {
+		t.Fatalf("a refused change altered the settings: %v", got)
+	}
+
+	// Switching back to OpenAI with a key clears the base URL (null in the API).
+	expect(t, put(map[string]any{"provider": "openai", "model": "gpt-5.5", "api_key": secret}), 200)
+	if got := expect(t, call(t, f.h, "GET", "/v1/ai/settings", nil, bearer(f.userToken)), 200).obj(t); got["base_url"] != nil || got["provider"] != "openai" {
+		t.Fatalf("after switching to openai: %v", got)
+	}
+
+	// Saving checks the key and model with the provider first. If the provider refuses,
+	// nothing is saved, so a typo can never replace a working setup.
+	fake.checkErr = &ai.ProviderError{Code: ai.CodeKeyRejected, Message: "rejected"}
+	r := expect(t, put(map[string]any{"provider": "openai_compatible", "model": model, "api_key": "sk-or-v1-TYPOTYPOTYPOTYPO0000", "base_url": base}), 422)
+	if r.Error.Code != ai.CodeKeyRejected {
+		t.Fatalf("code=%s", r.Error.Code)
+	}
+	expect(t, put(map[string]any{"provider": "openai", "model": "gpt-5.5-typo"}), 422) // a model-only change is checked too
+	if got := expect(t, call(t, f.h, "GET", "/v1/ai/settings", nil, bearer(f.userToken)), 200).obj(t); got["provider"] != "openai" || got["model"] != "gpt-5.5" || got["key_last4"] != "5432" {
+		t.Fatalf("a refused save changed the stored settings: %v", got)
+	}
+	fake.checkErr = &ai.ProviderError{Code: ai.CodeModelNotFound, Message: "no model"}
+	if r = expect(t, put(map[string]any{"provider": "openai", "model": "gpt-9"}), 422); r.Error.Code != ai.CodeModelNotFound {
+		t.Fatalf("code=%s", r.Error.Code)
+	}
+	// With no setting stored yet, a refused first save leaves nothing behind.
+	fake.checkErr = nil
+	expect(t, call(t, f.h, "DELETE", "/v1/ai/settings", nil, bearer(f.userToken)), 200)
+	fake.checkErr = &ai.ProviderError{Code: ai.CodeKeyRejected, Message: "rejected"}
+	expect(t, put(map[string]any{"provider": "openai", "model": "gpt-5.5", "api_key": secret}), 422)
+	if n := f.count(`SELECT count(*) FROM ai_provider_settings`); n != 0 {
+		t.Fatalf("a refused first save stored %d rows", n)
+	}
+}
+
+// An operator running a local model server opts in to http and private addresses.
+func TestIntegrationAIAllowPrivateURLs(t *testing.T) {
+	f := newFixture(t)
+	f.withAI(ai.Config{AllowPrivateURLs: true})
+	r := call(t, f.h, "PUT", "/v1/ai/settings", map[string]any{"provider": "openai_compatible", "model": "llama3.1", "api_key": "ollama-local-key-000000", "base_url": "http://host.docker.internal:11434/v1"}, bearer(f.userToken))
+	if got := expect(t, r, 200).obj(t); got["base_url"] != "http://host.docker.internal:11434/v1" {
+		t.Fatalf("settings: %v", got)
+	}
+	// Credentials in the URL stay forbidden even then.
+	expect(t, call(t, f.h, "PUT", "/v1/ai/settings", map[string]any{"provider": "openai_compatible", "model": "llama3.1", "api_key": "ollama-local-key-000000", "base_url": "http://u:p@localhost:11434/v1"}, bearer(f.userToken)), 422)
 }

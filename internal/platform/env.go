@@ -35,6 +35,9 @@ type Env struct {
 	ReadDB *pgxpool.Pool
 	// Credentials caches server-credential lookups (spec 6.6); nil disables caching.
 	Credentials *CredentialCache
+	// SecureCookies marks the dashboard session cookie Secure (https only). Off only for
+	// APP_ENV=local, where the dashboard runs over plain http.
+	SecureCookies bool
 	// Redis enables the optional leaderboard rank projection (spec 6.6); nil means
 	// ranks come from PostgreSQL alone. PostgreSQL stays the source of truth.
 	Redis redis.UniversalClient
@@ -68,6 +71,11 @@ const (
 	KindPlayer = "player"
 	KindServer = "server"
 	KindPublic = "public"
+	// KindAdmin is a dashboard user managing one player of an environment they own
+	// (playeradmin.Target). Reads reuse the game's handlers; the management routes run
+	// the same transaction functions as the game server, in their own idempotency
+	// namespace.
+	KindAdmin = "admin"
 )
 
 // SetPrincipal stores the authenticated principal on the request.

@@ -21,10 +21,15 @@ func IdempotencyKey(c *gin.Context) string {
 }
 
 // IdempotencyKind is the idempotency namespace for an actor: "server" for trusted
-// server credentials, "player" otherwise.
+// server credentials, "admin" for a dashboard user acting on a player, "player"
+// otherwise. Separate namespaces mean an admin's retry key can never replay (or
+// conflict with) a key the player's own client or the game server used.
 func IdempotencyKind(actor Principal) string {
-	if actor.Kind == KindServer {
+	switch actor.Kind {
+	case KindServer:
 		return "server"
+	case KindAdmin:
+		return "admin"
 	}
 	return "player"
 }
