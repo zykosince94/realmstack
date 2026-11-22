@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"realmstack-backend/internal/bans"
 	"realmstack-backend/internal/platform"
 )
 
@@ -142,6 +143,17 @@ func (h Handler) Login(c *gin.Context) {
 		platform.Fail(c, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Email or password is incorrect.")
 		return
 	}
+	// Checked only after the password, so a ban (and its reason) is never revealed to
+	// someone who merely knows the email address.
+	ban, err := bans.Active(c, h.DB, id, h.Now())
+	if err != nil {
+		platform.Internal(c, err)
+		return
+	}
+	if ban != nil {
+		bans.Denied(c, ban)
+		return
+	}
 	access, refresh, err := h.issueTokens(c, id, scope)
 	if err != nil {
 		platform.Internal(c, err)
@@ -178,6 +190,17 @@ func (h Handler) Refresh(c *gin.Context) {
 		WHERE rt.token_hash=$1 FOR UPDATE OF rt`, platform.Digest(in.RefreshToken)).Scan(&tokenID, &playerID, &family, &revoked, &expires, &scope.ProjectID, &scope.EnvironmentID)
 	if err != nil {
 		platform.Fail(c, http.StatusUnauthorized, "INVALID_REFRESH_TOKEN", "Refresh token is invalid or expired.")
+		return
+	}
+	// Before the reuse check: banning revoked this token, and presenting it is not theft,
+	// so the answer is "banned" rather than REFRESH_TOKEN_REUSE.
+	ban, err := bans.Active(c, tx, playerID, h.Now())
+	if err != nil {
+		platform.Internal(c, err)
+		return
+	}
+	if ban != nil {
+		bans.Denied(c, ban)
 		return
 	}
 	if revoked != nil {

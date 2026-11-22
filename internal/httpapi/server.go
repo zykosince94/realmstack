@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"realmstack-backend/internal/ai"
+	"realmstack-backend/internal/bans"
 	"realmstack-backend/internal/leaderboards"
 	"realmstack-backend/internal/limits"
 	"realmstack-backend/internal/platform"
@@ -45,6 +46,10 @@ type Config struct {
 	// CredentialCacheTTL caches successful server-credential lookups (capped at 60 s;
 	// 0 uses 30 s, negative disables).
 	CredentialCacheTTL time.Duration
+	// BanSyncInterval is how often each instance reads ban changes made elsewhere, so it
+	// bounds how long a newly banned player's access token keeps working on another
+	// instance. 0 uses bans.DefaultSyncInterval (5 s).
+	BanSyncInterval time.Duration
 }
 
 // DefaultQuotas leave headroom above the spec's target tenant (about 5,000 writes and
@@ -56,6 +61,7 @@ type Server struct {
 	Env     *platform.Env
 	AI      *ai.Service
 	Quotas  *limits.Quotas // nil without a database (unit tests)
+	Bans    *bans.Cache    // every ban in force, checked on each player-token request
 	cfg     Config
 	router  *gin.Engine
 	limiter *rateLimiter
@@ -93,6 +99,7 @@ func New(db *pgxpool.Pool, cfg Config, logger *slog.Logger) *Server {
 	}
 	clock := func() time.Time { return s.Env.Now() } // follows tests that replace Env.Now
 	s.Env.Credentials = platform.NewCredentialCache(cfg.CredentialCacheTTL, clock)
+	s.Bans = bans.NewCache(db, logger, clock, cfg.BanSyncInterval)
 	if db != nil {
 		s.Quotas = limits.NewQuotas(db, cfg.Quotas, clock)
 	}
@@ -225,9 +232,28 @@ func (s *Server) jwtAuth(kind string) gin.HandlerFunc {
 			platform.Fail(c, http.StatusUnauthorized, "UNAUTHORIZED", "A valid access token is required.")
 			return
 		}
+		if kind == platform.KindPlayer && s.refuseBanned(c, p.ID) {
+			return
+		}
 		platform.SetPrincipal(c, p)
 		c.Next()
 	}
+}
+
+// refuseBanned answers 403 PLAYER_BANNED (and reports true) for a banned player. Access
+// tokens are stateless and valid for up to 15 minutes, so without this check a ban would
+// only take effect when the token expired.
+func (s *Server) refuseBanned(c *gin.Context, playerID string) bool {
+	ban, err := s.Bans.Check(c, playerID)
+	if err != nil {
+		platform.Internal(c, err)
+		return true
+	}
+	if ban != nil {
+		bans.Denied(c, ban)
+		return true
+	}
+	return false
 }
 
 // serverAuth authenticates X-Server-Credential: prefix.secret. The prefix selects the
@@ -271,6 +297,9 @@ func (s *Server) serverAuth() gin.HandlerFunc {
 func (s *Server) publicScope() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if p, ok := s.Env.ReadToken(c.GetHeader("Authorization"), platform.KindPlayer); ok {
+			if s.refuseBanned(c, p.ID) {
+				return
+			}
 			platform.SetPrincipal(c, p)
 			platform.SetScope(c, p)
 			c.Next()

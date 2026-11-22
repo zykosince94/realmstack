@@ -5,6 +5,8 @@
 package platform
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -57,6 +59,17 @@ func Internal(c *gin.Context, err error) {
 // Bind decodes the JSON body into dst, answering 400 on failure.
 func Bind(c *gin.Context, dst any) bool {
 	if err := c.ShouldBindJSON(dst); err != nil {
+		BadRequest(c)
+		return false
+	}
+	return true
+}
+
+// BindOptional decodes an optional JSON body into dst: an empty body leaves dst as it is,
+// a malformed one answers 400.
+func BindOptional(c *gin.Context, dst any) bool {
+	raw, err := c.GetRawData()
+	if err != nil || (len(bytes.TrimSpace(raw)) > 0 && json.Unmarshal(raw, dst) != nil) {
 		BadRequest(c)
 		return false
 	}

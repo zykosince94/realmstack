@@ -4,7 +4,7 @@
 openapi: "3.0.3"
 info:
   title: "RealmStack API"
-  version: "0.8.0"
+  version: "0.9.0"
   description: "Multi-tenant game backend. Every response uses {data, meta}; every error uses {error:{code,message,details}, meta}. Mutations require an Idempotency-Key: a replay returns the stored result and status, a different request with the same key returns 409. This document is the API contract: the frontend generates its client from it, and a backend test fails if a route is missing here."
 servers:
   - url: "http://localhost:8080"
@@ -15,7 +15,7 @@ tags:
   - name: configuration
   - name: players
   - name: players-admin
-    description: "Dashboard player management: read an owned environment's players and act on them (grants, currency, XP, stats, claims, quests, scores)."
+    description: "Dashboard player management: read an owned environment's players and act on them (grants, currency, XP, stats, claims, quests, scores), and ban or unban them."
   - name: inventory
   - name: economy
   - name: progression
@@ -2266,6 +2266,12 @@ paths:
           schema:
             type: string
             maxLength: 100
+        - name: banned
+          in: query
+          required: false
+          description: "true lists only players with a ban in force."
+          schema:
+            type: boolean
         - name: limit
           in: query
           required: false
@@ -3612,6 +3618,181 @@ paths:
           "$ref": "#/components/responses/E409"
         "422":
           "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/players/{playerId}/bans":
+    get:
+      operationId: getProjectPlayerBans
+      tags:
+        - players-admin
+      summary: "The player's ban history, newest first (at most 100)."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to this environment)."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/PlayerBanRecord"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/projects/{projectId}/environments/{envId}/players/{playerId}/ban":
+    post:
+      operationId: postProjectPlayerBan
+      tags:
+        - players-admin
+      summary: "Ban the player until expires_at (omit for permanent). A banned player cannot sign in, refresh or use a player token (403 PLAYER_BANNED); every refresh token is revoked. Banning a banned player replaces the ban. The game server and the dashboard can still act on the player."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to this environment)."
+          schema:
+            type: string
+            format: uuid
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/BanRequest"
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/BanResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/players/{playerId}/ban/lift":
+    post:
+      operationId: postProjectPlayerBanLift
+      tags:
+        - players-admin
+      summary: "Lift the player's ban (422 NOT_BANNED if none is in force). Revoked sessions stay revoked; the player signs in again."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to this environment)."
+          schema:
+            type: string
+            format: uuid
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/BanLiftRequest"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/BanLiftResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
   "/v1/players/register":
     post:
       operationId: postPlayersRegister
@@ -3653,7 +3834,7 @@ paths:
       operationId: postPlayersLogin
       tags:
         - players
-      summary: "Sign a player in (rate limited)."
+      summary: "Sign a player in (rate limited). A banned player gets 403 PLAYER_BANNED (details: reason, expires_at), only after a correct password."
       security: []
       requestBody:
         required: true
@@ -3680,6 +3861,8 @@ paths:
           "$ref": "#/components/responses/E400"
         "401":
           "$ref": "#/components/responses/E401"
+        "403":
+          "$ref": "#/components/responses/E403"
         "422":
           "$ref": "#/components/responses/E422"
         "429":
@@ -3689,7 +3872,7 @@ paths:
       operationId: postPlayersRefresh
       tags:
         - players
-      summary: "Rotate a refresh token; reusing a rotated token revokes its family."
+      summary: "Rotate a refresh token; reusing a rotated token revokes its family. A banned player gets 403 PLAYER_BANNED."
       security: []
       requestBody:
         required: true
@@ -3716,6 +3899,8 @@ paths:
           "$ref": "#/components/responses/E400"
         "401":
           "$ref": "#/components/responses/E401"
+        "403":
+          "$ref": "#/components/responses/E403"
         "422":
           "$ref": "#/components/responses/E422"
   "/v1/players/me":
@@ -5749,7 +5934,7 @@ components:
     playerBearer:
       type: http
       scheme: bearer
-      description: "Player access token."
+      description: "Player access token. A banned player's token is refused on every route with 403 PLAYER_BANNED (details: reason, expires_at)."
     serverCredential:
       type: apiKey
       in: header
@@ -6600,6 +6785,9 @@ components:
           format: int64
         level:
           type: integer
+        banned:
+          type: boolean
+          description: "A ban is in force."
       required:
         - id
         - display_name
@@ -6608,6 +6796,7 @@ components:
         - created_at
         - total_xp
         - level
+        - banned
     PlayerAdminProfile:
       type: object
       properties:
@@ -6636,6 +6825,11 @@ components:
         active_sessions:
           type: integer
           description: "Refresh tokens that are neither revoked nor expired."
+        ban:
+          allOf:
+            - "$ref": "#/components/schemas/PlayerBan"
+          nullable: true
+          description: "The ban in force, or null."
       required:
         - id
         - display_name
@@ -6645,6 +6839,7 @@ components:
         - created_at
         - last_session_at
         - active_sessions
+        - ban
     UserSession:
       type: object
       properties:
@@ -7747,3 +7942,118 @@ components:
         - claims
         - claimed_by_player
         - claimed_by_server
+    PlayerBan:
+      type: object
+      description: "A ban in force. The reason is shown to the player."
+      properties:
+        id:
+          type: string
+          format: uuid
+        reason:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Null for a permanent ban."
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - reason
+        - expires_at
+        - created_at
+    PlayerBanRecord:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        reason:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+          description: "Email of the dashboard user who issued the ban."
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+        ended_by:
+          type: string
+          nullable: true
+          description: "Email of the dashboard user who lifted or replaced the ban."
+        end_kind:
+          type: string
+          nullable: true
+          enum:
+            - lifted
+            - replaced
+        end_note:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - expired
+            - lifted
+            - replaced
+      required:
+        - id
+        - reason
+        - expires_at
+        - created_at
+        - created_by
+        - ended_at
+        - ended_by
+        - end_kind
+        - end_note
+        - status
+    BanRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: "Shown to the player in the 403 PLAYER_BANNED response."
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "When the ban ends; must be in the future. Omit or null for a permanent ban."
+      required:
+        - reason
+    BanResult:
+      type: object
+      properties:
+        ban:
+          "$ref": "#/components/schemas/PlayerBanRecord"
+        sessions_revoked:
+          type: integer
+          format: int64
+          description: "Refresh tokens revoked by this ban."
+      required:
+        - ban
+        - sessions_revoked
+    BanLiftRequest:
+      type: object
+      properties:
+        note:
+          type: string
+          maxLength: 500
+          description: "Optional, kept in the ban history."
+    BanLiftResult:
+      type: object
+      properties:
+        ban:
+          "$ref": "#/components/schemas/PlayerBanRecord"
+      required:
+        - ban

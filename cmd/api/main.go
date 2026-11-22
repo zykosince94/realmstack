@@ -69,6 +69,7 @@ func main() {
 			MaxBatchEntries:   httpapi.ParseIntEnv("QUOTA_MAX_BATCH_ENTRIES", 0),
 		},
 		CredentialCacheTTL: duration("CREDENTIAL_CACHE_TTL", 30*time.Second),
+		BanSyncInterval:    duration("BAN_SYNC_INTERVAL", 5*time.Second),
 		AI: ai.Config{
 			EncryptionKey:   os.Getenv("AI_ENCRYPTION_KEY"),
 			Timeout:         duration("AI_TIMEOUT", 3*time.Minute),

@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"realmstack-backend/internal/achievements"
 	"realmstack-backend/internal/auth"
+	"realmstack-backend/internal/bans"
 	"realmstack-backend/internal/batch"
 	"realmstack-backend/internal/catalog"
 	"realmstack-backend/internal/economy"
@@ -37,6 +38,7 @@ func (s *Server) routes() {
 	achievementsH := achievements.Handler{Env: env}
 	questsH := quests.Handler{Env: env}
 	batchH := batch.Handler{Env: env, Quotas: s.Quotas}
+	bansH := bans.Handler{Env: env, Cache: s.Bans}
 
 	r := s.router
 	r.GET("/healthz", func(c *gin.Context) { platform.Success(c, http.StatusOK, gin.H{"status": "ok"}) })
@@ -100,6 +102,11 @@ func (s *Server) routes() {
 	adminPlayer.POST("/quests/:key/abandon", questsH.AbandonMine)
 	adminPlayer.POST("/quests/:key/claim", questsH.ClaimForPlayer)
 	adminPlayer.POST("/leaderboards/:key/scores", leaderboardsH.Submit)
+	// Bans are dashboard-only (no game route bans a player). They are enforced at login,
+	// refresh and on every player-token request (playerAuth).
+	adminPlayer.GET("/bans", bansH.History)
+	adminPlayer.POST("/ban", bansH.Ban)
+	adminPlayer.POST("/ban/lift", bansH.Lift)
 	environment.GET("/credentials", projectsH.ListCredentials)
 	environment.POST("/credentials", projectsH.IssueCredential)
 	environment.GET("/configurations/draft", catalogH.GetDraft)

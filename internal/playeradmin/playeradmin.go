@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"realmstack-backend/internal/bans"
 	"realmstack-backend/internal/economy"
 	"realmstack-backend/internal/platform"
 	"realmstack-backend/internal/progression"
@@ -48,6 +49,7 @@ func (h Handler) Target() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		platform.SetDashboardUser(c, platform.GetPrincipal(c).ID) // the user principal from userAuth
 		platform.SetPrincipal(c, platform.Principal{ID: playerID, ProjectID: projectID, EnvironmentID: envID, Kind: platform.KindAdmin})
 		c.Next()
 	}
@@ -83,15 +85,19 @@ func (h Handler) List(c *gin.Context) {
 		beforeAt, beforeID = &at, &id
 	}
 	pattern := "%" + escapeLike(search) + "%"
+	bannedOnly := c.Query("banned") == "true"
+	// The ban lookup is the same predicate as bans.Active (open, not expired at the API clock).
 	rows, err := h.DB.Query(c, `SELECT p.id::text,p.display_name,COALESCE(p.email,''),COALESCE(p.external_player_key,''),p.created_at,
-			COALESCE(pp.total_xp,0),COALESCE(pv.thresholds,'[]'::jsonb)
+			COALESCE(pp.total_xp,0),COALESCE(pv.thresholds,'[]'::jsonb),b.id IS NOT NULL
 		FROM players p
 		LEFT JOIN player_progression pp ON pp.player_id=p.id
 		LEFT JOIN progression_versions pv ON pv.id=pp.progression_version_id
+		LEFT JOIN player_bans b ON b.player_id=p.id AND b.ended_at IS NULL AND (b.expires_at IS NULL OR b.expires_at > $8)
 		WHERE p.project_id=$1 AND p.environment_id=$2
 		  AND ($3='' OR p.id::text=lower($3) OR p.display_name ILIKE $4 OR p.email ILIKE $4 OR p.external_player_key ILIKE $4)
 		  AND ($5::timestamptz IS NULL OR (p.created_at,p.id) < ($5,$6::uuid))
-		ORDER BY p.created_at DESC,p.id DESC LIMIT $7`, projectID, envID, search, pattern, beforeAt, beforeID, limit+1)
+		  AND (NOT $9 OR b.id IS NOT NULL)
+		ORDER BY p.created_at DESC,p.id DESC LIMIT $7`, projectID, envID, search, pattern, beforeAt, beforeID, limit+1, h.Now(), bannedOnly)
 	if err != nil {
 		platform.Internal(c, err)
 		return
@@ -106,7 +112,8 @@ func (h Handler) List(c *gin.Context) {
 		var created time.Time
 		var xp int64
 		var raw []byte
-		if err = rows.Scan(&id, &name, &email, &external, &created, &xp, &raw); err != nil {
+		var banned bool
+		if err = rows.Scan(&id, &name, &email, &external, &created, &xp, &raw, &banned); err != nil {
 			platform.Internal(c, err)
 			return
 		}
@@ -117,7 +124,7 @@ func (h Handler) List(c *gin.Context) {
 		var thresholds []int64
 		_ = json.Unmarshal(raw, &thresholds)
 		out = append(out, gin.H{"id": id, "display_name": name, "email": nullable(email), "external_player_key": nullable(external),
-			"created_at": created, "total_xp": xp, "level": progression.LevelFor(thresholds, xp)})
+			"created_at": created, "total_xp": xp, "level": progression.LevelFor(thresholds, xp), "banned": banned})
 		lastAt, lastID = created, id
 	}
 	if err = rows.Err(); err != nil {
@@ -149,8 +156,13 @@ func (h Handler) Profile(c *gin.Context) {
 		platform.Internal(c, err)
 		return
 	}
+	ban, err := bans.Active(c, h.DB, p.ID, h.Now())
+	if err != nil {
+		platform.Internal(c, err)
+		return
+	}
 	platform.Success(c, http.StatusOK, gin.H{"id": p.ID, "display_name": name, "email": nullable(email), "external_player_key": nullable(external),
-		"metadata": json.RawMessage(metadata), "created_at": created, "last_session_at": lastSession, "active_sessions": activeSessions})
+		"metadata": json.RawMessage(metadata), "created_at": created, "last_session_at": lastSession, "active_sessions": activeSessions, "ban": ban})
 }
 
 func nullable(s string) any {

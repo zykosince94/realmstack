@@ -21,6 +21,14 @@ func Owned(c *gin.Context) (projectID, envID string) {
 	return c.GetString("owned_project"), c.GetString("owned_environment")
 }
 
+// SetDashboardUser records which dashboard user is acting. playeradmin.Target calls it
+// before it replaces the principal with the managed player, so routes that record who
+// did something (bans) can still tell.
+func SetDashboardUser(c *gin.Context, userID string) { c.Set("dashboard_user", userID) }
+
+// DashboardUser returns the acting dashboard user's ID on a player management route.
+func DashboardUser(c *gin.Context) string { return c.GetString("dashboard_user") }
+
 // PlayerInScope reports whether playerID belongs to the scope's project/environment.
 // A UUID is never authorization on its own: this predicate is.
 //
