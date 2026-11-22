@@ -13,7 +13,7 @@ import (
 	"realmstack-backend/internal/platform"
 )
 
-// The seven operations of spec 7.1. Generating operations return a catalog.Proposal
+// The seven operations. Generating operations return a catalog.Proposal
 // that is merged into a copy of the draft and validated; "explain" and "tests" return
 // an answer that is shown but never applied.
 const (

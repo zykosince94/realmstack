@@ -14,7 +14,7 @@ import (
 // every request is a map lookup instead of a database query.
 //
 // Why not query per request, or cache per player? Player tokens are the hottest path
-// (spec 6.6 targets about 100k concurrent players). A per-request query adds a round trip
+// (a large game has about 100k concurrent players). A per-request query adds a round trip
 // to every call, and a per-player TTL cache still costs a query per player per TTL. Bans
 // in force are few, so holding all of them is cheap.
 //

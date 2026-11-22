@@ -1,4 +1,4 @@
--- Cloud saves (post-MVP, 2026-11-22): named JSON save slots per player. Saves are
+-- Cloud saves: named JSON save slots per player. Saves are
 -- mutable state, not a ledger: each write replaces the slot and bumps its version, which
 -- clients send back as expected_version so two devices cannot silently overwrite each
 -- other (optimistic concurrency).

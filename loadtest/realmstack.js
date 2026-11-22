@@ -1,5 +1,5 @@
-// k6 load test for the spec 6.6 target profile: a large tenant with ~500k registered
-// players (the spec says ~1M; reduced by decision, 2026-11-17), ~100k concurrent,
+// k6 load test for a large tenant: ~500k registered players (the reference profile is
+// ~1M; this suite seeds fewer), ~100k concurrent,
 // ~5,000 trusted writes per second, and a login surge of ~100k players in 10 minutes
 // (~167 logins/s).
 //
@@ -8,7 +8,7 @@
 // the rates those players produce. SCALE multiplies every rate (SCALE=0.2 for a quick
 // run); DURATION sets the length of the main phase.
 //
-// Pass criteria (spec 10, Phase 8 exit): p95 under 150 ms for writes, under 50 ms for
+// Pass criteria: p95 under 150 ms for writes, under 50 ms for
 // leaderboard top-100 and player rank.
 import http from "k6/http";
 import { check } from "k6";

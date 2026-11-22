@@ -75,7 +75,7 @@ type QuestStageConfig struct {
 	Rewards    goals.Rewards     `json:"rewards"`
 }
 
-// QuestConfig defines an active, staged goal (spec 2.7). One model covers story
+// QuestConfig defines an active, staged goal. One model covers story
 // (chained), side, repeatable (daily/weekly) and event (windowed) quests.
 type QuestConfig struct {
 	Key                  string             `json:"key"`
@@ -118,7 +118,7 @@ type Config struct {
 	Achievements []AchievementConfig `json:"achievements"`
 	Quests       []QuestConfig       `json:"quests"`
 	// The draft may also carry "editor_layout" (quest node positions saved by the
-	// dashboard). It is deliberately not decoded: publishing ignores it (spec 5.4).
+	// dashboard). It is deliberately not decoded: publishing ignores it.
 }
 
 // Handler serves configuration routes.
@@ -127,8 +127,7 @@ type Handler struct{ *platform.Env }
 // DraftCollections are the definition arrays every draft carries.
 var DraftCollections = []string{"items", "currencies", "leaderboards", "stats", "achievements", "quests"}
 
-// Limits from the spec: 1–5 conditions per achievement or quest stage (2.6, 2.7) and
-// 1–20 stages per quest.
+// Limits: 1–5 conditions per achievement or quest stage and 1–20 stages per quest.
 const (
 	MaxAchievementConditions = 5
 	MaxStageConditions       = 5
@@ -780,7 +779,7 @@ func (h Handler) publishVersion(c *gin.Context, tx pgx.Tx, projectID, envID stri
 	return gin.H{"version": version, "published_at": publishedAt.UTC(), "progression_version": progression, "progression_version_created": created}, nil
 }
 
-// Rollback republishes an earlier version as a new version (spec 7.3); history is
+// Rollback republishes an earlier version as a new version; history is
 // never rewritten. The old configuration must still pass today's rules, including the
 // history-dependent ones (a stat that has since recorded values keeps its kind). The
 // draft is reset to the restored configuration too, keeping its editor_layout;
@@ -1026,7 +1025,7 @@ func nonNil(s []string) []string {
 	return s
 }
 
-// --- Per-definition draft editing (spec 5.2) ---
+// --- Per-definition draft editing ---
 
 // draftEdit changes a parsed draft in place and returns the response, or an error to
 // send instead (in which case nothing is saved).

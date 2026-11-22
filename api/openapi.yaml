@@ -4,7 +4,7 @@
 openapi: "3.0.3"
 info:
   title: "RealmStack API"
-  version: "0.9.0"
+  version: "1.0.0"
   description: "Multi-tenant game backend. Every response uses {data, meta}; every error uses {error:{code,message,details}, meta}. Mutations require an Idempotency-Key: a replay returns the stored result and status, a different request with the same key returns 409. This document is the API contract: the frontend generates its client from it, and a backend test fails if a route is missing here."
 servers:
   - url: "http://localhost:8080"

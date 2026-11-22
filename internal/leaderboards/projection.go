@@ -1,6 +1,6 @@
 package leaderboards
 
-// Optional Redis rank projection (spec 6.6).
+// Optional Redis rank projection.
 //
 // Why it exists: a player's rank in PostgreSQL is a count of the index entries ahead of
 // them. Counting costs about 65 ns per entry, so a mid-table lookup on a board with N

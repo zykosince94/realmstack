@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// phase5Config extends the base fixture config with stats, flags and achievements.
-func phase5Config() map[string]any {
+// achievementsConfig extends the base fixture config with stats, flags and achievements.
+func achievementsConfig() map[string]any {
 	cfg := testConfig()
 	cfg["stats"] = []map[string]any{
 		{"key": "trolls_defeated", "name": "Trolls defeated", "kind": "counter"},
@@ -51,13 +51,13 @@ func (f *fixture) serverPath(playerID, suffix string) string {
 	return "/v1/server/players/" + playerID + suffix
 }
 
-// TestIntegrationPhase5ExitCriteria walks the spec's Phase 5 exit criterion: a player
+// TestIntegrationAchievementLifecycle covers the achievement lifecycle: a player
 // completes an achievement through existing economy/XP/score APIs and server-reported
 // stats/flags, claims it exactly once (replays return the original result), receives
 // its rewards atomically, and claim rewards do not count toward other achievements.
-func TestIntegrationPhase5ExitCriteria(t *testing.T) {
+func TestIntegrationAchievementLifecycle(t *testing.T) {
 	f := newFixture(t)
-	expect(t, f.publish(phase5Config()), 201)
+	expect(t, f.publish(achievementsConfig()), 201)
 
 	// Progress comes from the existing APIs...
 	expect(t, f.server(f.serverPath(f.playerID, "/xp/award"), "xp-1", map[string]any{"amount": 120}), 200)
@@ -129,7 +129,7 @@ func TestIntegrationPhase5ExitCriteria(t *testing.T) {
 
 func TestIntegrationStatsAndFlags(t *testing.T) {
 	f := newFixture(t)
-	expect(t, f.publish(phase5Config()), 201)
+	expect(t, f.publish(achievementsConfig()), 201)
 	inc := f.serverPath(f.playerID, "/stats/trolls_defeated/increment")
 
 	// Only a trusted server credential may write; players get 401 (no such route for them).
@@ -167,7 +167,7 @@ func TestIntegrationStatsAndFlags(t *testing.T) {
 	expect(t, call(t, f.h, "GET", f.serverPath(f.playerID, "/stats"), nil, map[string]string{"X-Server-Credential": f.credential}), 200)
 
 	// The stat kind cannot change once values exist.
-	cfg := phase5Config()
+	cfg := achievementsConfig()
 	cfg["stats"] = []map[string]any{{"key": "trolls_defeated", "name": "Trolls", "kind": "flag"}, {"key": "talked_to_elder", "name": "Elder", "kind": "flag"}}
 	cfg["achievements"] = []map[string]any{}
 	r := expect(t, f.publish(cfg), 422)
@@ -178,7 +178,7 @@ func TestIntegrationStatsAndFlags(t *testing.T) {
 
 func TestIntegrationAchievementPoliciesAndMasking(t *testing.T) {
 	f := newFixture(t)
-	expect(t, f.publish(phase5Config()), 201)
+	expect(t, f.publish(achievementsConfig()), 201)
 	// Hidden incomplete achievements are masked for players, not for the server.
 	a := f.achievements(f.player)
 	if a["secret_room"]["name"] != nil || a["secret_room"]["conditions"] != nil {
@@ -220,7 +220,7 @@ func TestIntegrationAchievementPoliciesAndMasking(t *testing.T) {
 
 func TestIntegrationClaimRollsBackOnFailingReward(t *testing.T) {
 	f := newFixture(t)
-	cfg := phase5Config()
+	cfg := achievementsConfig()
 	cfg["achievements"] = []map[string]any{{"key": "sword_bonus", "name": "Sword Bonus",
 		"conditions": []map[string]any{{"type": "xp_total", "target": 1}},
 		"rewards":    map[string]any{"currencies": []map[string]any{{"currency_key": "gems", "amount": 5}}, "items": []map[string]any{{"item_key": "iron_sword", "quantity": 1}}}}}
@@ -243,7 +243,7 @@ func TestIntegrationClaimRollsBackOnFailingReward(t *testing.T) {
 
 func TestIntegrationConcurrentClaimsPayOnce(t *testing.T) {
 	f := newFixture(t)
-	expect(t, f.publish(phase5Config()), 201)
+	expect(t, f.publish(achievementsConfig()), 201)
 	expect(t, f.server(f.serverPath(f.playerID, "/xp/award"), "xp", map[string]any{"amount": 100}), 200)
 	var wg sync.WaitGroup
 	statuses := make([]int, 10)
@@ -275,7 +275,7 @@ func TestIntegrationConcurrentClaimsPayOnce(t *testing.T) {
 
 func TestIntegrationAchievementValidationAndRepublish(t *testing.T) {
 	f := newFixture(t)
-	bad := phase5Config()
+	bad := achievementsConfig()
 	bad["achievements"] = []map[string]any{
 		{"key": "a", "name": "A", "conditions": []map[string]any{{"type": "stat", "stat_key": "talked_to_elder", "target": 1}}},
 		{"key": "b", "name": "B", "conditions": []map[string]any{{"type": "level_reached", "target": 9}}, "rewards": map[string]any{"items": []map[string]any{{"item_key": "iron_sword", "quantity": 2}}}},
@@ -290,7 +290,7 @@ func TestIntegrationAchievementValidationAndRepublish(t *testing.T) {
 
 	// Definitions edited one at a time are shape-checked; references wait for publish.
 	ach := f.envPath("/achievements")
-	expect(t, call(t, f.h, "PUT", f.envPath("/configurations/draft"), phase5Config(), bearer(f.userToken)), 200)
+	expect(t, call(t, f.h, "PUT", f.envPath("/configurations/draft"), achievementsConfig(), bearer(f.userToken)), 200)
 	expect(t, call(t, f.h, "POST", ach, map[string]any{"key": "new_one", "name": "New", "conditions": []map[string]any{{"type": "flag", "flag_key": "not_defined_yet"}}}, bearer(f.userToken)), 201)
 	expect(t, call(t, f.h, "POST", ach, map[string]any{"key": "broken", "name": "Broken", "conditions": []map[string]any{}}, bearer(f.userToken)), 422)
 	validation := expect(t, call(t, f.h, "POST", f.envPath("/configurations/validate"), nil, bearer(f.userToken)), 200).obj(t)
@@ -304,7 +304,7 @@ func TestIntegrationAchievementValidationAndRepublish(t *testing.T) {
 	expect(t, call(t, f.h, "POST", f.envPath("/configurations/publish"), nil, bearer(f.userToken)), 201)
 	expect(t, f.server(f.serverPath(f.playerID, "/xp/award"), "xp", map[string]any{"amount": 100}), 200)
 	expect(t, f.playerPost(f.player, "/v1/players/me/achievements/first_steps/claim", "c1", nil), 200)
-	trimmed := phase5Config()
+	trimmed := achievementsConfig()
 	trimmed["achievements"] = []map[string]any{}
 	expect(t, f.publish(trimmed), 201)
 	if a := f.achievements(f.player); len(a) != 0 {

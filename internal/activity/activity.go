@@ -2,7 +2,7 @@
 // dashboard: concurrent players (CCU) over the last 24 hours and daily active players
 // (DAU) over the last 30 days.
 //
-// Decision 2026-11-22: activity is derived from sessions, with no new tracking. Every
+// Activity is derived from sessions, with no separate presence tracking. Every
 // login, registration and token refresh inserts a refresh_tokens row, and a running game
 // refreshes about every 14 minutes (access tokens live 15), so:
 //

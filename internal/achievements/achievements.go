@@ -19,7 +19,7 @@ import (
 // Handler serves achievement routes.
 type Handler struct{ *platform.Env }
 
-// Statuses, in precedence order (spec 6.4).
+// Statuses, in precedence order.
 const (
 	StatusClaimed    = "claimed"
 	StatusCompleted  = "completed"
@@ -208,7 +208,7 @@ func (h Handler) ClaimForPlayer(c *gin.Context) {
 	h.claim(c, actor, "server")
 }
 
-// claim follows spec 6.4: idempotency → lock the player → evaluate → reject if already
+// claim runs in one transaction: idempotency → lock the player → evaluate → reject if already
 // claimed (409) or not complete (422) → pay rewards tagged with the achievement source
 // → record the claim → commit. A failing reward rolls back everything.
 func (h Handler) claim(c *gin.Context, actor platform.Principal, by string) {

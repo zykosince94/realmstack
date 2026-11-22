@@ -1,6 +1,6 @@
--- Phase 7: AI configuration assistant (bring your own key).
+-- AI configuration assistant (bring your own key).
 
--- One provider setting per dashboard user (spec 4). The API key is encrypted with
+-- One provider setting per dashboard user. The API key is encrypted with
 -- AES-256-GCM under a key from the deployment's environment (AI_ENCRYPTION_KEY),
 -- never stored in the database. key_version allows rotating that encryption key;
 -- key_last4 is the only part of the key the API ever returns.

@@ -61,7 +61,7 @@ func (s *Server) routes() {
 	user.POST("/projects", projectsH.Create)
 	user.GET("/projects/:projectId", projectsH.Get)
 	user.POST("/credentials/:id/revoke", projectsH.RevokeCredential)
-	// AI assistant settings belong to the dashboard user (spec 4: ai_provider_settings).
+	// AI assistant settings belong to the dashboard user (table ai_provider_settings).
 	aiUser := user.Group("/ai", s.AI.RequireEnabled())
 	aiUser.GET("/settings", s.AI.GetSettings)
 	aiUser.PUT("/settings", s.AI.PutSettings)

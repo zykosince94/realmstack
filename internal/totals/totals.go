@@ -4,8 +4,8 @@
 // ledger rows, and they can be rebuilt from the ledgers at any time (Rebuild).
 //
 // Why: evaluating "earn 10,000 credits" by summing a player's whole ledger on every
-// achievement read grows with the player's history. A total is one indexed row
-// (spec 6.6). Windowed (quest) conditions still read the ledgers, bounded by the window.
+// achievement read grows with the player's history. A total is one indexed row.
+// Windowed (quest) conditions still read the ledgers, bounded by the window.
 package totals
 
 import (

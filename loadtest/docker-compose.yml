@@ -1,4 +1,4 @@
-# Load-test environment for the spec 6.6 target profile (see loadtest/README.md).
+# Load-test environment for the reference traffic profile (see loadtest/README.md).
 # Its own project name and database volume: it never touches the local demo stack.
 #
 #   docker compose up -d --build db pgbouncer1 pgbouncer2 pgbouncer3 redis api1 api2 api3
@@ -26,7 +26,7 @@ x-api: &api
     # One k6 container is one client IP; real login surges come from many IPs.
     AUTH_RATE_LIMIT_PER_MINUTE: "100000000"
     ACCESS_TOKEN_TTL: 1h
-    # Rank projection (spec 6.6): player ranks from a Redis sorted set.
+    # Rank projection: player ranks from a Redis sorted set.
     REDIS_URL: redis://redis:6379/0
   depends_on:
     db:

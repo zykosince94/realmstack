@@ -65,9 +65,9 @@ type seedPlayer struct {
 func seedLoad(ctx context.Context, db *pgxpool.Pool, args []string) error {
 	fs := flag.NewFlagSet("seed-load", flag.ExitOnError)
 	players := fs.Int("players", 500_000, "number of players")
-	// The profile has ~100k players online, so k6 spreads writes over that many. The
-	// first runs used 20,000, which made per-player row locks collide far more often
-	// than real traffic would (and a batch locks 50 players until it commits).
+	// The profile has ~100k players online, so k6 spreads writes over that many. A much
+	// smaller sample makes per-player row locks collide far more often than real traffic
+	// would (and a batch locks 50 players until it commits).
 	sample := fs.Int("sample", 100_000, "players written to the output file for k6")
 	resample := fs.Bool("resample", false, "keep the existing tenant and only replace the player sample in -out")
 	out := fs.String("out", "loadtest/data/tenant.json", "output file")

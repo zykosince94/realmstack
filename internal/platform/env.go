@@ -33,12 +33,12 @@ type Env struct {
 	// (leaderboard rankings, goal progress). nil means use DB. Every write, claim and
 	// accept uses DB, the primary.
 	ReadDB *pgxpool.Pool
-	// Credentials caches server-credential lookups (spec 6.6); nil disables caching.
+	// Credentials caches server-credential lookups; nil disables caching.
 	Credentials *CredentialCache
 	// SecureCookies marks the dashboard session cookie Secure (https only). Off only for
 	// APP_ENV=local, where the dashboard runs over plain http.
 	SecureCookies bool
-	// Redis enables the optional leaderboard rank projection (spec 6.6); nil means
+	// Redis enables the optional leaderboard rank projection; nil means
 	// ranks come from PostgreSQL alone. PostgreSQL stays the source of truth.
 	Redis redis.UniversalClient
 }

@@ -2,10 +2,10 @@
 // from PostgreSQL: best score per player, earliest best breaks ties, seasons are
 // start-inclusive and end-exclusive.
 //
-// Since Phase 8 rankings read leaderboard_best_scores, a per-player best maintained in
+// Rankings read leaderboard_best_scores, a per-player best maintained in
 // the submission transaction, instead of recomputing best scores from every
 // submission on each read. Top-N is an index scan and a player's rank is one indexed
-// count of better entries (spec 6.6). RebuildBestScores recomputes the table from the
+// count of better entries. RebuildBestScores recomputes the table from the
 // submissions, which remain the source of truth. With Redis configured, ranks come
 // from a sorted-set projection when it is exact for the player (projection.go).
 package leaderboards

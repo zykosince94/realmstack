@@ -145,9 +145,9 @@ func TestIntegrationAISettingsAreEncryptedAndPrivate(t *testing.T) {
 	}
 }
 
-// TestIntegrationPhase7ExitCriterion: "AI-generated invalid configuration is rejected;
-// valid configuration is published only after human approval."
-func TestIntegrationPhase7ExitCriterion(t *testing.T) {
+// TestIntegrationAIProposalValidation checks that an AI-generated invalid configuration
+// is rejected and a valid configuration is published only after human approval.
+func TestIntegrationAIProposalValidation(t *testing.T) {
 	f := newFixture(t)
 	_, fake := f.withAI(ai.Config{})
 	expect(t, f.aiSettings("sk-proj-TESTKEYVALUE00000001"), 200)
@@ -283,7 +283,7 @@ func TestIntegrationAIConflictsDraftChangesAndFailures(t *testing.T) {
 }
 
 // What leaves the server: the draft's definitions and the brief, never players,
-// emails, credentials or ledger data (spec 2.8, 7.2).
+// emails, credentials or ledger data.
 func TestIntegrationAIPromptContainsNoPrivateData(t *testing.T) {
 	f := newFixture(t)
 	_, fake := f.withAI(ai.Config{})

@@ -10,9 +10,8 @@
 //
 // What a ban does not touch: the trusted game server and the dashboard can still act on
 // the player (to settle a match, or to correct a balance), and the player's existing
-// leaderboard scores stay on the boards. Hiding a banned player's scores is a separate,
-// deliberately deferred change, because the optional Redis projection would need to
-// drop and restore them too.
+// leaderboard scores stay on the boards. Hiding them would require the optional Redis
+// projection to drop and restore entries.
 package bans
 
 import (

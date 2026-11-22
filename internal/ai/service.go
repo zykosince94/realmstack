@@ -22,7 +22,7 @@ import (
 // Config is the assistant's deployment configuration.
 type Config struct {
 	// EncryptionKey (AI_ENCRYPTION_KEY, base64, 32 bytes). Empty disables the assistant;
-	// every other feature works unchanged (spec 2.8: AI is optional).
+	// every other feature works unchanged (AI is optional).
 	EncryptionKey   string
 	Timeout         time.Duration // per generation, including the provider's retries
 	MaxOutputTokens int64         // output token cap per call
@@ -365,8 +365,7 @@ func scanGeneration(row pgx.Row) (gin.H, error) {
 	}, nil
 }
 
-// allowStart enforces the per-user start rate (in process, like the auth limiter;
-// Phase 8 moves limits to a shared store).
+// allowStart enforces the per-user start rate in process, like the auth limiter.
 func (s *Service) allowStart(userID string, now time.Time) bool {
 	s.limitMu.Lock()
 	defer s.limitMu.Unlock()

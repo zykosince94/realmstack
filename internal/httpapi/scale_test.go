@@ -107,7 +107,7 @@ func TestIntegrationBestScoresRankAndRebuild(t *testing.T) {
 
 func TestIntegrationGoalTotalsMatchLedgersAndRebuild(t *testing.T) {
 	f := newFixture(t)
-	expect(t, f.publish(phase6Config(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0))), 201)
+	expect(t, f.publish(questsConfig(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0))), 201)
 	expect(t, f.grant(f.playerID, "health_potion", 3), 200)
 	expect(t, f.playerPost(f.player, "/v1/players/me/inventory/consume", "c1", map[string]any{"item_key": "health_potion", "quantity": 1}), 200)
 	expect(t, f.credit(f.playerID, "credits", 100), 200)
@@ -149,7 +149,7 @@ func TestIntegrationGoalTotalsMatchLedgersAndRebuild(t *testing.T) {
 
 func TestIntegrationBatchWrites(t *testing.T) {
 	f := newFixture(t)
-	expect(t, f.publish(phase5Config()), 201)
+	expect(t, f.publish(achievementsConfig()), 201)
 	other, _, _ := f.registerPlayer("other@batch.test", "Other")
 	entries := []map[string]any{
 		{"type": "grant", "idempotency_key": "b1", "player_id": f.playerID, "item_key": "health_potion", "quantity": 2},
@@ -352,7 +352,7 @@ func TestIntegrationScoreRange(t *testing.T) {
 // must be one player: the same entry replays instead of applying twice.
 func TestIntegrationBatchPlayerIDCase(t *testing.T) {
 	f := newFixture(t)
-	expect(t, f.publish(phase5Config()), 201)
+	expect(t, f.publish(achievementsConfig()), 201)
 	entry := func(id string) map[string]any {
 		return map[string]any{"type": "grant", "idempotency_key": "case-1", "player_id": id, "item_key": "health_potion", "quantity": 1}
 	}

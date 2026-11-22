@@ -6,7 +6,7 @@ import (
 	"realmstack-backend/internal/goals"
 )
 
-// Statuses, in precedence order (spec 6.5): the first that applies wins.
+// Statuses, in precedence order: the first that applies wins.
 const (
 	StatusClaimed   = "claimed"   // completion reward claimed this period
 	StatusLocked    = "locked"    // a required quest or achievement is not completed
@@ -107,7 +107,7 @@ type State struct {
 // Claimable reports whether a claim would pay anything.
 func (s *State) Claimable() bool { return len(s.ClaimableStages) > 0 || s.ClaimableComplete }
 
-// Evaluator computes quest states for one player at one moment (spec 6.4, 6.5). It
+// Evaluator computes quest states for one player at one moment. It
 // resolves prerequisites recursively and memoizes, so each quest is evaluated once.
 type Evaluator struct {
 	Now    time.Time
@@ -128,7 +128,7 @@ func NewEvaluator(now time.Time, defs map[string]*Definition, p Player, facts Fa
 
 // completedEver reports whether a quest counts as completed for requires_quests: its
 // completion reward was claimed in any period, or, for a non-repeating quest, it is
-// complete now (spec 6.5).
+// complete now.
 func (e *Evaluator) completedEver(key string) (bool, error) {
 	if _, ok := e.Player.FirstCompletion[key]; ok {
 		return true, nil
@@ -215,7 +215,7 @@ func (e *Evaluator) State(key string) (*State, error) {
 
 	if s.Engaged {
 		// Count from acceptance (or the later start of the period) until the earlier
-		// of the period end and the availability window end (spec 6.4).
+		// of the period end and the availability window end.
 		from := *s.AcceptedAt
 		if s.Period.Start != nil && s.Period.Start.After(from) {
 			from = *s.Period.Start

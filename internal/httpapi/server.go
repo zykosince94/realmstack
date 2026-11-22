@@ -52,7 +52,7 @@ type Config struct {
 	BanSyncInterval time.Duration
 }
 
-// DefaultQuotas leave headroom above the spec's target tenant (about 5,000 writes and
+// DefaultQuotas leave headroom above a very large tenant (about 5,000 writes and
 // a similar number of reads per second).
 var DefaultQuotas = limits.Limits{RequestsPerMinute: 1_200_000, WritesPerMinute: 600_000, MaxBatchEntries: 500}
 

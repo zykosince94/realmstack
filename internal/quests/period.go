@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// Repeat modes (spec 2.7).
+// Repeat modes.
 const (
 	RepeatNone   = "none"
 	RepeatDaily  = "daily"

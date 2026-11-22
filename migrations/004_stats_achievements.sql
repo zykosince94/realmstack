@@ -1,4 +1,4 @@
--- Phase 5: stats/flags (server-reported game-world facts) and achievements.
+-- Stats/flags (server-reported game-world facts) and achievements.
 
 -- Stat and flag definitions are synced from the published configuration's "stats" array.
 CREATE TABLE IF NOT EXISTS stat_definitions (

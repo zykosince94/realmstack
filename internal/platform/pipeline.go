@@ -7,7 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Write-behind pipelining for mutations (Phase 8).
+// Write-behind pipelining for mutations.
 //
 // Why: the load test found PgBouncer, which is single-threaded, pinned at one core
 // while PostgreSQL and the API had CPU to spare. Its cost is per network round trip,

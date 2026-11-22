@@ -1,4 +1,4 @@
-// Package quests serves active, staged goals (spec 2.7, 6.5): the player accepts a
+// Package quests serves active, staged goals: the player accepts a
 // quest, works through ordered stages and claims stage and completion rewards. Quests
 // share the goal engine with achievements: the same conditions, ledger-derived
 // evaluation (inside an acceptance-anchored window) and transactional reward payment.
@@ -290,8 +290,7 @@ func (h Handler) AcceptForPlayer(c *gin.Context) {
 	h.accept(c, actor)
 }
 
-// accept is allowed only when the quest is available and inside its window (spec
-// 6.5). Accepting again after abandoning reactivates the period's row with a new
+// accept is allowed only when the quest is available and inside its window. Accepting again after abandoning reactivates the period's row with a new
 // acceptance time, so progress restarts; stage claims already made this period stay,
 // so their rewards are not paid twice.
 func (h Handler) accept(c *gin.Context, actor platform.Principal) {
@@ -366,7 +365,7 @@ func (h Handler) ClaimForPlayer(c *gin.Context) {
 }
 
 // claim delivers every earned but unclaimed stage reward plus the completion reward
-// if the quest is complete, in one transaction (spec 2.7, 6.4): idempotency → lock the
+// if the quest is complete, in one transaction: idempotency → lock the
 // player → evaluate → reject → for each reward: insert its claim record, then pay it
 // tagged source='quest' → commit. Any failing reward rolls the whole claim back. The
 // unique (player, quest, period, stage) key is the final guard against paying twice.

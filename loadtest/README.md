@@ -1,10 +1,10 @@
-# Load test (spec 6.6, Phase 8)
+# Load test
 
-A k6 suite and a disposable multi-instance environment for the Phase 8 target profile. The environment has its own Compose project (`realmstack-load`) and database volume, so it never touches the local demo stack. This directory holds the method; results are not recorded here, because they depend entirely on the hardware (see "Reading results").
+A k6 suite and a disposable multi-instance environment for scale and capacity testing. The environment has its own Compose project (`realmstack-load`) and database volume, so it never touches the local demo stack. This directory holds the method; results are not recorded here, because they depend entirely on the hardware (see "Reading results").
 
 ## Traffic profile
 
-**Deviation from the spec (decision 2026-11-17):** spec 6.6 names a tenant with about 1M registered players. This suite seeds **500,000**. Everything else is the spec's profile: about 100k online, about 5k trusted writes per second at peak, and a login surge of about 100k players in 10 minutes.
+The reference profile is a tenant with about 1M registered players, about 100k online, about 5k trusted writes per second at peak, and a login surge of about 100k players in 10 minutes. This suite seeds **500,000 players** and models the rest as request rates.
 
 "100k concurrent" is modelled as request rates (constant-arrival-rate scenarios), not 100k virtual users: an online player's client polls now and then, and the rates below are what those players produce.
 
@@ -18,7 +18,7 @@ A k6 suite and a disposable multi-instance environment for the Phase 8 target pr
 | `player_reads` | 2,000/s | Inventory, currency, progression, achievements and quests reads |
 | `login_surge` | 167/s | Player login at bcrypt cost 10 (`LOGIN_DURATION`, default 2 m) |
 
-The steady mix is about 7,500 requests/s. Pass criteria (spec section 10): p95 under 150 ms for writes, under 50 ms for top-100 and for rank; under 1% failed requests. k6 enforces them as thresholds, so a failing run exits non-zero.
+The steady mix is about 7,500 requests/s. Pass criteria: p95 under 150 ms for writes, under 50 ms for top-100 and for rank; under 1% failed requests. k6 enforces them as thresholds, so a failing run exits non-zero.
 
 ## Run it
 
@@ -45,7 +45,7 @@ PostgreSQL 17, three API instances, one PgBouncer per API instance (transaction 
 
 - **Run k6 on separate hardware from the database** when you want a result that says something about the platform. A single host running k6, three APIs, three PgBouncers, Redis and PostgreSQL saturates its CPUs, and every request then queues for CPU at every hop; the latencies measure the host, not the design.
 - Compare runs at several scales (`SCALE=0.5`, `0.75`, `1`). A healthy system shows flat latency until a resource saturates and then a sharp rise; the scale where it bends tells you the ceiling, and `docker stats` plus the profiling below tell you which resource it is.
-- Phase 8's exit criterion is that the full profile passes these thresholds. **That has not been verified on target hardware.** Do it before relying on the numbers in the spec.
+- Run the full profile on the hardware you intend to use and treat the thresholds as the pass criteria for that environment.
 
 ## Profiling
 
@@ -58,14 +58,14 @@ docker compose exec -T db psql -U realmstack -d realmstack -c \
 
 Sample `pg_stat_activity` (`wait_event_type`, `wait_event`) and `pg_blocking_pids()` while a run is in progress to tell CPU, WAL flushes and row-lock queues apart. `pg_stat_statements_reset()` between runs.
 
-## Bottlenecks the first runs exposed (all addressed)
+## Design notes
 
-- **PgBouncer is single-threaded.** Its cost is per network round trip, so one shared instance pinned a core while PostgreSQL and the APIs had CPU to spare. Hence one PgBouncer per API instance, and write pipelining (`platform.DeferExec`) to cut round trips per mutation.
-- **Concurrent batches deadlocked** when they locked random players in opposite orders. A batch now applies entries grouped by (lower-cased) player ID, so locks are taken in one global order.
+- **PgBouncer is single-threaded.** Its cost is per network round trip, so one shared instance pins a core while PostgreSQL and the APIs have CPU to spare. Hence one PgBouncer per API instance, and write pipelining (`platform.DeferExec`) to cut round trips per mutation.
+- **Concurrent batches could deadlock** if they locked random players in opposite orders. A batch applies entries grouped by (lower-cased) player ID, so locks are taken in one global order.
 - **Counting the entries ahead of a player** in PostgreSQL costs about 65 ns each, so a mid-table rank on a large board costs tens of milliseconds of CPU. That is the reason for the optional Redis sorted-set projection (`internal/leaderboards/projection.go`).
-- **Leaderboard reads** made three sequential round trips (board, top-N, rank); they now make one pipelined batch.
-- **A small player sample** (20,000) made per-player row locks collide far more often than real traffic would; the default sample is 100,000.
-- **`exec`/simple-protocol modes** (the usual advice for transaction-mode pooling) broke JSON arguments. PgBouncer 1.21+ tracks prepared statements per server connection, so pgx's default mode works with `max_prepared_statements`.
+- **Leaderboard reads** use one pipelined batch instead of three sequential round trips (board, top-N, rank).
+- **A small player sample** makes per-player row locks collide far more often than real traffic would; the default sample is 100,000.
+- **`exec`/simple-protocol modes** (the usual advice for transaction-mode pooling) break JSON arguments. PgBouncer 1.21+ tracks prepared statements per server connection, so pgx's default mode works with `max_prepared_statements`.
 
 ## Correctness checks
 

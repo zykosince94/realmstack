@@ -1,4 +1,4 @@
-// Package ai is the AI configuration assistant (spec 2.8, 7): users bring their own
+// Package ai is the AI configuration assistant: users bring their own
 // provider key, the assistant proposes definitions as structured JSON, and the server
 // validates every proposal with the same rules as hand-written configuration. A
 // proposal changes nothing until a person applies it to the draft, and the draft goes

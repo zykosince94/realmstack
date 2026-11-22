@@ -155,7 +155,7 @@ func TestIntegrationPlayerAdminActions(t *testing.T) {
 	f := newFixture(t)
 	clock := f.withClock()
 	clock.set(base)
-	expect(t, f.publish(phase6Config(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0))), 201)
+	expect(t, f.publish(questsConfig(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0))), 201)
 	pid := f.playerID
 	post := func(suffix, key string, body any) apiResult {
 		return call(t, f.h, "POST", f.envPath("/players/"+pid+suffix), body, withKey(bearer(f.userToken), key))

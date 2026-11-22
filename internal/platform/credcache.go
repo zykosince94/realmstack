@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// CredentialCache keeps successful server-credential lookups for a short time (spec
-// 6.6: at most 60 seconds), so a game server sending thousands of writes per second
+// CredentialCache keeps successful server-credential lookups for a short time (at most
+// 60 seconds), so a game server sending thousands of writes per second
 // does not cost one credential query per request. The secret is still checked against
 // the cached digest on every request; only the database lookup is skipped.
 //

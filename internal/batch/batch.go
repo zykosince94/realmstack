@@ -1,4 +1,4 @@
-// Package batch serves POST /v1/server/batch (spec 5.3, 6.6): many trusted writes in
+// Package batch serves POST /v1/server/batch: many trusted writes in
 // one request, so a game server can report a match's results without hundreds of
 // round trips. Each entry runs the normal idempotency algorithm (platform.MutateIn)
 // inside its own savepoint: a failing entry rolls back only itself, a retried batch
@@ -29,7 +29,7 @@ import (
 	"realmstack-backend/internal/stats"
 )
 
-// DefaultMaxEntries applies when quotas are not configured (spec: default 500).
+// DefaultMaxEntries applies when quotas are not configured (default 500).
 const DefaultMaxEntries = 500
 
 // Handler serves the batch route.

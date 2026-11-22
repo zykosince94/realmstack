@@ -51,7 +51,7 @@ func windowSQL(column string) string {
 
 // LoadFacts reads every total a player's goals can depend on. It is the single
 // data-access function for goal progress, so how totals are stored can change without
-// touching callers (spec 6.6). It only reads.
+// touching callers. It only reads.
 //
 // An all-time window (achievements) reads the maintained totals: player_goal_totals and
 // leaderboard_best_scores, a handful of indexed rows however long the player's

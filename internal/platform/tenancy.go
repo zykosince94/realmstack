@@ -32,7 +32,7 @@ func DashboardUser(c *gin.Context) string { return c.GetString("dashboard_user")
 // PlayerInScope reports whether playerID belongs to the scope's project/environment.
 // A UUID is never authorization on its own: this predicate is.
 //
-// Positive answers are cached in memory (Phase 8): every server write checks scope, and
+// Positive answers are cached in memory: every server write checks scope, and
 // the lookup was one PostgreSQL round trip per request. Caching only "yes" is safe
 // because a player row never moves to another project or environment and is never
 // deleted (projects are archived, and archiving is enforced on the credential, whose

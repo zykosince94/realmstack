@@ -11,7 +11,7 @@ import (
 )
 
 // rateLimiter is a fixed-window counter per key. It is per process: with several API
-// instances each enforces its own budget (a shared store is planned for Phase 8).
+// instances each enforces its own budget.
 type rateLimiter struct {
 	mu      sync.Mutex
 	limit   int

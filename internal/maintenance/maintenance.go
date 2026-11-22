@@ -1,4 +1,4 @@
-// Package maintenance runs the retention jobs of spec 6.6: create ledger partitions
+// Package maintenance runs the retention jobs: create ledger partitions
 // ahead of time, delete expired idempotency records in batches, and drop old
 // rate-limit windows. Every API instance runs the loop; a transaction-scoped advisory
 // lock picks one instance per task run. Transaction-scoped (not session) locks keep it

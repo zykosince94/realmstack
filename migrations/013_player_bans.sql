@@ -1,4 +1,4 @@
--- Player bans (post-MVP, 2026-11-22). A dashboard admin bans a player of an environment
+-- Player bans. A dashboard admin bans a player of an environment
 -- they own, for a while or permanently; a banned player cannot sign in, refresh a session
 -- or use a player token. One row per ban: lifting or replacing a ban ends the row instead
 -- of deleting it, so the table is also the ban history.

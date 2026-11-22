@@ -94,8 +94,8 @@ func main() {
 		logger.Error("could not recover abandoned AI generations", "error", err)
 		os.Exit(1)
 	}
-	if len(cfg.JWTSecret) < 32 {
-		logger.Error("JWT_SECRET must be set to at least 32 characters")
+	if err = httpapi.ValidateJWTSecret(cfg.JWTSecret, cfg.Env); err != nil {
+		logger.Error(err.Error())
 		os.Exit(1)
 	}
 	if cfg.DemoMode && cfg.Env == "local" {

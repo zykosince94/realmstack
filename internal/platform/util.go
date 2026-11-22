@@ -82,7 +82,7 @@ var (
 
 // BcryptCost is the cost for new password hashes (BCRYPT_COST; default 10). Stored
 // hashes keep the cost they were created with. Login throughput under a surge is
-// scaled by adding API instances, not by lowering this (spec 6.6).
+// scaled by adding API instances, not by lowering this.
 var BcryptCost = bcrypt.DefaultCost
 
 // HashPassword hashes a password with BcryptCost.

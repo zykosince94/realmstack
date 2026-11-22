@@ -1,6 +1,6 @@
 // Package limits enforces rate limits and per-tenant quotas through PostgreSQL, so
-// they hold across every API instance (spec 6.6). Phase 1–7 counted in process
-// memory, so N instances quietly allowed N times the limit.
+// they hold across every API instance. Earlier in-process counters let N instances
+// quietly allow N times the limit.
 //
 // Two strategies, chosen by traffic volume:
 //

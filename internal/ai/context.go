@@ -15,7 +15,7 @@ import (
 const MaxContextBytes = 200_000
 
 // The model sees only the draft's definitions, through these allow-listed shapes
-// (spec 2.8: never send player PII, secrets, credentials or production data). The
+// (never send player PII, secrets, credentials or production data). The
 // draft is the only input: no player, ledger, credential or user table is read when
 // building a prompt. Item metadata is reduced to its slot because metadata is free-form
 // and could hold anything a designer pasted into it.

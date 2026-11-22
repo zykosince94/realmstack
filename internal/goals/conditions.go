@@ -15,7 +15,7 @@ import (
 	"realmstack-backend/internal/platform"
 )
 
-// Condition types (spec 2.6). The set is closed: anything else is rejected.
+// Condition types. The set is closed: anything else is rejected.
 const (
 	XPTotal          = "xp_total"
 	LevelReached     = "level_reached"

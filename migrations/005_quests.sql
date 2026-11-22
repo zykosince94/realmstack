@@ -1,4 +1,4 @@
--- Phase 6: quests. Active, staged goals on the shared goal engine (spec 2.7, 6.5).
+-- Quests. Active, staged goals on the shared goal engine.
 
 -- Quest definitions are synced from the published configuration's "quests" array.
 -- Removed quests are deactivated, never deleted, so acceptances and claims keep their

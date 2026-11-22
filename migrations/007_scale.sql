@@ -1,4 +1,4 @@
--- Phase 8: scale, retention and tenant fairness (spec 6.6).
+-- Scale, retention and tenant fairness.
 --
 -- Before v1 there is no production data to preserve, so the four ledgers are dropped
 -- and recreated as monthly range-partitioned tables. A local demo database needs a
@@ -111,7 +111,7 @@ END $$;
 SELECT realmstack_ensure_partitions((date_trunc('month', now()) - interval '1 month')::date, 3);
 
 -- Leaderboards: one row per player and board, maintained in the score-submission
--- transaction (spec 6.3, 6.6). rank_score is the score negated on higher-is-better
+-- transaction. rank_score is the score negated on higher-is-better
 -- boards, so "better" is always "smaller (rank_score, achieved_at, player_id)" and one
 -- ascending index serves top-N and rank for both directions. A board's direction
 -- cannot change once it has scores, so rank_score never goes stale.
@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS leaderboard_best_scores (
 );
 CREATE INDEX IF NOT EXISTS leaderboard_rank_idx ON leaderboard_best_scores(leaderboard_id, rank_score, achieved_at, player_id);
 
--- All-time goal totals for source='api' rows (spec 6.6), maintained in the same
+-- All-time goal totals for source='api' rows, maintained in the same
 -- transaction as each ledger insert and rebuildable from the ledgers. Metrics:
 -- grant:<item>, grant: (any item), consume:<item>, consume:, credit:<currency>,
 -- spend:<currency>, xp, stat:<counter>.

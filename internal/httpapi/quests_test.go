@@ -11,10 +11,10 @@ import (
 	"realmstack-backend/internal/platform"
 )
 
-// phase6Config extends the Phase 5 config with a three-quest chain, a daily, an event
-// quest and a server-claimed auto-accept quest.
-func phase6Config(eventFrom, eventUntil time.Time) map[string]any {
-	cfg := phase5Config()
+// questsConfig extends the achievement config with a three-quest chain, a daily, an
+// event quest and a server-claimed auto-accept quest.
+func questsConfig(eventFrom, eventUntil time.Time) map[string]any {
+	cfg := achievementsConfig()
 	cfg["stats"] = append(cfg["stats"].([]map[string]any),
 		map[string]any{"key": "entered_mine", "name": "Entered the mine", "kind": "flag"},
 		map[string]any{"key": "ore_delivered", "name": "Ore delivered", "kind": "flag"})
@@ -111,14 +111,14 @@ func wantCode(t *testing.T, r apiResult, status int, code string) {
 
 var base = time.Date(2027, 3, 1, 9, 0, 0, 0, time.UTC)
 
-// TestIntegrationPhase6QuestChain covers the exit criteria "a three-quest chain unlocks
-// in order" and "stages advance only in order", plus combined claims, replay and the
-// rule that quest rewards never count toward goals.
-func TestIntegrationPhase6QuestChain(t *testing.T) {
+// TestIntegrationQuestChain covers a three-quest chain that unlocks in order, staged
+// progress, combined claims, replay and the rule that quest rewards never count toward
+// goals.
+func TestIntegrationQuestChain(t *testing.T) {
 	f := newFixture(t)
 	clock := f.withClock()
 	clock.set(base)
-	expect(t, f.publish(phase6Config(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0))), 201)
+	expect(t, f.publish(questsConfig(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0))), 201)
 
 	q := f.quests()
 	wantStatus(t, q["chain_one"], "available")
@@ -206,12 +206,12 @@ func TestIntegrationPhase6QuestChain(t *testing.T) {
 }
 
 // TestIntegrationQuestAbandonAndReaccept: abandon/re-accept restarts progress without
-// paying stage rewards twice (spec checklist 11).
+// paying stage rewards twice.
 func TestIntegrationQuestAbandonAndReaccept(t *testing.T) {
 	f := newFixture(t)
 	clock := f.withClock()
 	clock.set(base)
-	expect(t, f.publish(phase6Config(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0))), 201)
+	expect(t, f.publish(questsConfig(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0))), 201)
 	f.setFlag("talked_to_elder")
 	expect(t, f.quest("chain_one", "accept", "a1"), 200)
 	expect(t, f.quest("chain_one", "claim", "c1"), 200)
@@ -261,7 +261,7 @@ func TestIntegrationDailyQuestResetsAtUTCMidnight(t *testing.T) {
 	day1 := time.Date(2027, 3, 1, 23, 0, 0, 0, time.UTC)
 	day2 := day1.Add(time.Hour) // 00:00 UTC
 	clock.set(day1)
-	expect(t, f.publish(phase6Config(day1.AddDate(0, 1, 0), day1.AddDate(0, 2, 0))), 201)
+	expect(t, f.publish(questsConfig(day1.AddDate(0, 1, 0), day1.AddDate(0, 2, 0))), 201)
 
 	expect(t, f.quest("daily", "accept", "d1"), 200)
 	f.trolls(2)
@@ -303,7 +303,7 @@ func TestIntegrationEventQuestWindow(t *testing.T) {
 	clock := f.withClock()
 	from, until := base.Add(24*time.Hour), base.Add(48*time.Hour)
 	clock.set(base)
-	expect(t, f.publish(phase6Config(from, until)), 201)
+	expect(t, f.publish(questsConfig(from, until)), 201)
 	wantStatus(t, f.quests()["event"], "upcoming")
 	wantCode(t, f.quest("event", "accept", "e0"), 422, "QUEST_NOT_AVAILABLE")
 
@@ -338,7 +338,7 @@ func TestIntegrationQuestPolicyAutoAcceptAndServerRoutes(t *testing.T) {
 	f := newFixture(t)
 	clock := f.withClock()
 	clock.set(base)
-	expect(t, f.publish(phase6Config(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0))), 201)
+	expect(t, f.publish(questsConfig(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0))), 201)
 
 	// Auto-accept counts from publication; claim policy server blocks the player.
 	auto := f.quests()["server_only"]
@@ -389,7 +389,7 @@ func TestIntegrationConcurrentQuestClaimsPayOnce(t *testing.T) {
 	f := newFixture(t)
 	clock := f.withClock()
 	clock.set(base)
-	expect(t, f.publish(phase6Config(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0))), 201)
+	expect(t, f.publish(questsConfig(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0))), 201)
 	expect(t, f.quest("chain_one", "accept", "a1"), 200)
 	f.setFlag("talked_to_elder")
 	var wg sync.WaitGroup
@@ -421,7 +421,7 @@ func TestIntegrationQuestValidationAndRepublish(t *testing.T) {
 	f := newFixture(t)
 	clock := f.withClock()
 	clock.set(base)
-	cfg := func() map[string]any { return phase6Config(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0)) }
+	cfg := func() map[string]any { return questsConfig(base.AddDate(0, 1, 0), base.AddDate(0, 2, 0)) }
 
 	bad := cfg()
 	quests := bad["quests"].([]map[string]any)

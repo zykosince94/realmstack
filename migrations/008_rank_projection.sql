@@ -1,4 +1,4 @@
--- Outbox for the optional Redis rank projection (spec 6.6). A score submission that
+-- Outbox for the optional Redis rank projection. A score submission that
 -- improves a player's best inserts a row here in the same transaction (only when Redis
 -- is configured); API workers copy the player's current best into a Redis sorted set
 -- and delete the row. A row with player_id NULL marks the end of a full replay: once
