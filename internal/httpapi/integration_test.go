@@ -563,17 +563,33 @@ func TestIntegrationDemoSeedIsIdempotentAndReconciles(t *testing.T) {
 	if err := demo.Seed(ctx, db, logger); err != nil {
 		t.Fatal(err)
 	}
+	f := &fixture{t: t, db: db}
+	seededSessions := `SELECT count(*) FROM refresh_tokens WHERE token_hash LIKE 'demo-activity:%'`
+	firstRun := f.count(seededSessions)
 	if _, err := db.Exec(ctx, `UPDATE configuration_drafts SET config=jsonb_set(config,'{progression}','[10,20]')`); err != nil {
 		t.Fatal(err)
 	}
 	if err := demo.Seed(ctx, db, logger); err != nil {
 		t.Fatalf("second seed: %v", err)
 	}
-	f := &fixture{t: t, db: db}
+	// The activity history: 20 crowd players with a month of sessions; seeding again only
+	// fills the gap since the last seeded bucket (at most one new bucket here).
+	if n := f.count(`SELECT count(*) FROM players WHERE email LIKE 'crowd%@realmstack.local' AND password_hash IS NULL`); n != 20 {
+		t.Fatalf("crowd players=%d, want 20 without passwords", n)
+	}
+	if firstRun < 1000 {
+		t.Fatalf("seeded sessions=%d, want a month of history", firstRun)
+	}
+	if again := f.count(seededSessions); again < firstRun || again > firstRun+20 {
+		t.Fatalf("second seed went from %d to %d sessions; it must only fill the gap", firstRun, again)
+	}
+	if n := f.count(`SELECT count(*) FROM refresh_tokens WHERE token_hash LIKE 'demo-activity:%' AND revoked_at IS NULL`); n != 0 {
+		t.Fatalf("%d seeded sessions are usable", n)
+	}
 	if n := f.count(`SELECT (config->'progression'->>0)::int FROM configuration_drafts`); n != 10 {
 		t.Fatalf("seeding again overwrote the developer's draft (progression[0]=%d)", n)
 	}
-	if n := f.count(`SELECT amount::int FROM balances`); n != 5000 {
+	if n := f.count(`SELECT amount::int FROM balances WHERE player_id=(SELECT id FROM players WHERE email=$1)`, demo.DemoPlayerEmail); n != 5000 {
 		t.Fatalf("balance=%d", n)
 	}
 	if n := f.count(`SELECT COALESCE(SUM(quantity),0)::int FROM economy_transactions WHERE currency_id IS NOT NULL`); n != 5000 {
@@ -585,6 +601,13 @@ func TestIntegrationDemoSeedIsIdempotentAndReconciles(t *testing.T) {
 
 	// The seeded credentials work end to end.
 	h := newServer(t, db).Handler()
+	// The second admin signs in with a plain username and owns no projects.
+	clean := expect(t, call(t, h, "POST", "/v1/auth/login", map[string]any{"email": demo.DemoCleanAdmin, "password": demo.DemoAdminPassword}, nil), 200).obj(t)
+	var owned []map[string]any
+	expect(t, call(t, h, "GET", "/v1/projects", nil, bearer(clean["access_token"].(string))), 200).into(t, &owned)
+	if len(owned) != 0 {
+		t.Fatalf("the clean admin owns %d projects, want none", len(owned))
+	}
 	login := expect(t, call(t, h, "POST", "/v1/players/login", map[string]any{"public_environment_id": demo.DemoPublicEnvironment, "email": demo.DemoPlayerEmail, "password": demo.DemoPlayerPassword}, nil), 200).obj(t)
 	playerID := login["player"].(map[string]any)["id"].(string)
 	expect(t, call(t, h, "POST", "/v1/server/players/"+playerID+"/currency/credit", map[string]any{"currency_key": "gems", "amount": 5},

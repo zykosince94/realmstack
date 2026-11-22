@@ -18,6 +18,7 @@ internal/players/        player identity, refresh-token rotation, profile
 internal/playeradmin/    dashboard player management: list/search, profile, and the Target guard for the admin routes (the game's handlers do the work)
 internal/bans/           player bans: ban/lift/history routes, and the per-instance cache that playerAuth checks
 internal/saves/          cloud saves: versioned JSON slots per player (player, server and dashboard routes share the handlers)
+internal/activity/       dashboard player activity (CCU and DAU) derived from session issuance
 internal/inventory/      item stacks and equipment (Grant is reused by goal rewards)
 internal/economy/        balances and history (Credit/Spend are reused by goal rewards)
 internal/progression/    XP, levels, version pinning (AwardXP is reused by goal rewards)
@@ -50,12 +51,14 @@ The API is at `http://localhost:8080`; health check: `GET /healthz`. Compose exp
 
 | Purpose | Value |
 |---|---|
-| Dashboard login | `admin@realmstack.local` / `RealmStackLocal!2026` |
+| Dashboard login | `admin@realmstack.local` / `RealmStackLocal!2026` (owns the demo project) |
+| Clean-workspace login | `admin` / `RealmStackLocal!2026` (a username, not an email; owns no projects, for trying the first-project flow) |
 | Player login | `player@realmstack.local` / `PlayerLocal!2026` |
 | Development public environment ID | `pub_realmstack_demo_dev` |
 | Demo server credential | `rs_demo.realmstack-local-server-secret` |
 | Published content | Credits, Gems, Health Potion, Iron Sword; progression thresholds 100/300/700/1500 XP; `global` leaderboard |
 | Demo player save | slot `slot1` (a small JSON save, inserted once) |
+| Demo crowd | 20 players `crowd01…20@realmstack.local` (no password) with a month of seeded sessions, so the dashboard's activity chart has data; each startup fills only the gap since the last seeded session |
 
 These are demo-only credentials. Seed behavior requires **both** `APP_ENV=local` and `DEMO_MODE=true`. The application defaults to `APP_ENV=production`; the example environment file has `DEMO_MODE=false`. Do not deploy the Compose credentials or demo secrets.
 
@@ -196,6 +199,13 @@ Named JSON save slots per player, so a player can continue on another device (po
 * **Optimistic concurrency:** send the version you last read as `expected_version` (`0` = the slot must not exist yet). If another device wrote in between, the write is refused with `409 SAVE_VERSION_CONFLICT` and `details.current_version`, and the game decides how to merge. Omit `expected_version` for last-write-wins.
 * **Limits:** 10 slots per player (`422 SAVE_SLOT_LIMIT`), 256 KiB per save measured as compacted JSON (`422 SAVE_TOO_LARGE`; the request body limit is 1 MiB). Slot names use the catalog key format (`^[a-z0-9][a-z0-9_-]{0,62}$`). These are constants in `internal/saves`, not per-project settings.
 * The same handlers serve the player (`/v1/players/me/saves`), the trusted server (`/v1/server/players/{playerId}/saves`) and the dashboard (`.../environments/{envId}/players/{playerId}/saves`). Saves are client-authoritative when the client writes them; a game that must not trust its client writes saves only from its server. Saves are state, not a ledger: there is no history of earlier versions.
+
+## Player activity (dashboard)
+
+`GET /v1/projects/{projectId}/environments/{envId}/activity` returns concurrent players per 15-minute window for the last 24 hours (the 96 complete windows before the current one), daily active players for the last 30 UTC days, and `ccu_now`, `ccu_peak_24h`, `dau_today` (post-MVP, 2026-11-22).
+
+* **Derived from sessions, no extra tracking (decision 2026-11-22).** Every login, registration and refresh inserts a `refresh_tokens` row, and a running game refreshes about every 14 minutes (access tokens live 15). A player counts as online in a window in which a session was issued for them, and as active on a UTC day on which one was. `ccu_now` is a rolling 15-minute window.
+* **Limits of the approximation:** it depends on clients refreshing on schedule; history goes back only as far as refresh tokens are kept (maintenance deletes them a day after expiry, so `REFRESH_TOKEN_TTL`, default 30 days, bounds the DAU window); and the queries scan the window's token rows (index `refresh_tokens_created_idx`, migration `015`), which is heavy for a very large tenant. It uses the read replica when configured. Real presence tracking would replace it without changing the response.
 
 ## Player bans
 

@@ -17,7 +17,11 @@ import (
 )
 
 const (
-	DemoAdminEmail        = "admin@realmstack.local"
+	DemoAdminEmail = "admin@realmstack.local"
+	// DemoCleanAdmin is a second dashboard account that owns nothing: a clean workspace
+	// for trying the first-project flow. It is a username, not an email address; login
+	// only matches the stored value, and the seed is the only way it is created.
+	DemoCleanAdmin        = "admin"
 	DemoAdminPassword     = "RealmStackLocal!2026"
 	DemoPlayerEmail       = "player@realmstack.local"
 	DemoPlayerPassword    = "PlayerLocal!2026"
@@ -43,6 +47,11 @@ func Seed(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error {
 	defer tx.Rollback(ctx)
 	var userID, projectID, envID string
 	err = tx.QueryRow(ctx, `INSERT INTO users(email,password_hash) VALUES($1,$2) ON CONFLICT(email) DO UPDATE SET password_hash=EXCLUDED.password_hash RETURNING id::text`, DemoAdminEmail, string(adminHash)).Scan(&userID)
+	if err != nil {
+		return err
+	}
+	// The clean-workspace admin shares the demo password and gets no project.
+	_, err = tx.Exec(ctx, `INSERT INTO users(email,password_hash) VALUES($1,$2) ON CONFLICT(email) DO UPDATE SET password_hash=EXCLUDED.password_hash`, DemoCleanAdmin, string(adminHash))
 	if err != nil {
 		return err
 	}
@@ -133,8 +142,12 @@ func Seed(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error {
 	if err = SeedAIGenerations(ctx, db); err != nil {
 		return fmt.Errorf("seed AI demo generations: %w", err)
 	}
+	// Players and session history for the dashboard's CCU/DAU chart (see activity.go).
+	if err = SeedActivity(ctx, db, projectID, envID); err != nil {
+		return fmt.Errorf("seed demo activity: %w", err)
+	}
 	if logger != nil {
-		logger.Warn("LOCAL DEMO ENABLED: seeded demo accounts and server credential", "admin_email", DemoAdminEmail, "player_email", DemoPlayerEmail, "public_environment", DemoPublicEnvironment)
+		logger.Warn("LOCAL DEMO ENABLED: seeded demo accounts and server credential", "admin_email", DemoAdminEmail, "clean_admin", DemoCleanAdmin, "player_email", DemoPlayerEmail, "public_environment", DemoPublicEnvironment)
 	}
 	return nil
 }

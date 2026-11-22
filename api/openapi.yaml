@@ -2310,6 +2310,49 @@ paths:
         "404":
           "$ref": "#/components/responses/E404"
 
+  "/v1/projects/{projectId}/environments/{envId}/activity":
+    get:
+      operationId: getProjectActivity
+      tags:
+        - players-admin
+      summary: "Concurrent players (15-minute buckets, last 24 h) and daily active players (UTC days, last 30 days), derived from when sessions were issued (login, registration, refresh). An approximation: see the backend README."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/PlayerActivity"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+
   "/v1/projects/{projectId}/environments/{envId}/players/{playerId}":
     get:
       operationId: getProjectPlayer
@@ -8776,3 +8819,62 @@ components:
           "$ref": "#/components/schemas/PlayerBanRecord"
       required:
         - ban
+    PlayerActivity:
+      type: object
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        bucket_minutes:
+          type: integer
+          description: "Width of a CCU bucket (15)."
+        ccu_now:
+          type: integer
+          format: int64
+          description: "Players with a session issued in the last 15 minutes."
+        ccu_peak_24h:
+          type: integer
+          format: int64
+        dau_today:
+          type: integer
+          format: int64
+          description: "Players with a session issued today (UTC), so far."
+        ccu:
+          type: array
+          description: "The 96 complete buckets before the current one, oldest first; a bucket counts players with a session issued within it (the current window is ccu_now)."
+          items:
+            type: object
+            properties:
+              at:
+                type: string
+                format: date-time
+                description: "Bucket start."
+              players:
+                type: integer
+                format: int64
+            required:
+              - at
+              - players
+        dau:
+          type: array
+          description: "30 UTC days, oldest first; today is partial."
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              players:
+                type: integer
+                format: int64
+            required:
+              - date
+              - players
+      required:
+        - generated_at
+        - bucket_minutes
+        - ccu_now
+        - ccu_peak_24h
+        - dau_today
+        - ccu
+        - dau

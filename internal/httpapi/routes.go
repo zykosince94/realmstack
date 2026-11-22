@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"realmstack-backend/internal/achievements"
+	"realmstack-backend/internal/activity"
 	"realmstack-backend/internal/auth"
 	"realmstack-backend/internal/bans"
 	"realmstack-backend/internal/batch"
@@ -40,6 +41,7 @@ func (s *Server) routes() {
 	questsH := quests.Handler{Env: env}
 	batchH := batch.Handler{Env: env, Quotas: s.Quotas}
 	savesH := saves.Handler{Env: env}
+	activityH := activity.Handler{Env: env}
 	bansH := bans.Handler{Env: env, Cache: s.Bans}
 
 	r := s.router
@@ -76,6 +78,8 @@ func (s *Server) routes() {
 	// Players of an owned environment, read-only. The detail routes reuse the game's own
 	// read handlers; Target narrows the request to one player of this environment.
 	environment.GET("/players", playerAdminH.List)
+	// Concurrent and daily active players, derived from session issuance (dashboard chart).
+	environment.GET("/activity", activityH.Get)
 	adminPlayer := environment.Group("/players/:playerId", playerAdminH.Target())
 	adminPlayer.GET("", playerAdminH.Profile)
 	adminPlayer.GET("/inventory", inventoryH.List)
