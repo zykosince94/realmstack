@@ -1,6 +1,6 @@
 # RealmStack backend
 
-A Go/Gin modular monolith backed by PostgreSQL. It provides dashboard authentication and tenant-owned projects/environments, hashed/revocable server credentials, player registration and rotating refresh tokens, published environment configuration, inventory/economy, pinned XP progression, PostgreSQL leaderboards, server-reported stats and flags, achievements and quests on a shared goal engine, dashboard player management with bans, an optional AI configuration assistant (bring your own OpenAI key), and the Phase 8 scale layer (best-score and goal-total tables, batch writes, shared rate limits and quotas, partitioned ledgers, optional Redis rank projection). Redis is optional. It needs Go 1.27.
+A Go/Gin modular monolith backed by PostgreSQL. It provides dashboard authentication and tenant-owned projects/environments, hashed/revocable server credentials, player registration and rotating refresh tokens, published environment configuration, inventory/economy, pinned XP progression, PostgreSQL leaderboards, server-reported stats and flags, achievements and quests on a shared goal engine, cloud saves, dashboard player management with bans, an optional AI configuration assistant (bring your own OpenAI key), and the Phase 8 scale layer (best-score and goal-total tables, batch writes, shared rate limits and quotas, partitioned ledgers, optional Redis rank projection). Redis is optional. It needs Go 1.27.
 
 **The API contract is [`api/openapi.yaml`](api/openapi.yaml).** Every route is documented there, `TestOpenAPICoversEveryRoute` fails when routes and the document disagree, and the frontend generates its TypeScript client from it. Update it in the same change as any route.
 
@@ -17,6 +17,7 @@ internal/catalog/        configuration drafts, field-level validation, publishin
 internal/players/        player identity, refresh-token rotation, profile
 internal/playeradmin/    dashboard player management: list/search, profile, and the Target guard for the admin routes (the game's handlers do the work)
 internal/bans/           player bans: ban/lift/history routes, and the per-instance cache that playerAuth checks
+internal/saves/          cloud saves: versioned JSON slots per player (player, server and dashboard routes share the handlers)
 internal/inventory/      item stacks and equipment (Grant is reused by goal rewards)
 internal/economy/        balances and history (Credit/Spend are reused by goal rewards)
 internal/progression/    XP, levels, version pinning (AwardXP is reused by goal rewards)
@@ -54,6 +55,7 @@ The API is at `http://localhost:8080`; health check: `GET /healthz`. Compose exp
 | Development public environment ID | `pub_realmstack_demo_dev` |
 | Demo server credential | `rs_demo.realmstack-local-server-secret` |
 | Published content | Credits, Gems, Health Potion, Iron Sword; progression thresholds 100/300/700/1500 XP; `global` leaderboard |
+| Demo player save | slot `slot1` (a small JSON save, inserted once) |
 
 These are demo-only credentials. Seed behavior requires **both** `APP_ENV=local` and `DEMO_MODE=true`. The application defaults to `APP_ENV=production`; the example environment file has `DEMO_MODE=false`. Do not deploy the Compose credentials or demo secrets.
 
@@ -100,7 +102,7 @@ Replace `PLAYER_UUID` with the `player.id` returned at login or registration. Fo
 * `GET|POST /v1/projects/{projectId}/environments`
 * `GET|POST /v1/projects/{projectId}/environments/{envId}/credentials` (lists metadata; shows a new credential once)
 * `POST /v1/credentials/{id}/revoke`
-* Players of an environment (`players-admin`), for the dashboard: `GET .../environments/{envId}/players?search=&limit=&cursor=` (newest first; `search` matches part of the display name, email or external key, or a whole player ID), `GET .../players/{playerId}` (identity, metadata, last session, active sessions), and `GET .../players/{playerId}/inventory|currency|transactions|progression|stats|achievements|quests`, the same data the game sees. Management, because players never use the dashboard: `POST .../players/{playerId}/items/grant`, `inventory/consume|equip|unequip`, `currency/credit|spend`, `xp/award`, `stats/{statKey}/increment`, `flags/{flagKey}/set`, `achievements/{key}/claim`, `quests/{key}/accept|abandon|claim`, and `leaderboards/{key}/scores`. They run the same handlers and transaction functions as the game, so every rule holds (a balance cannot go below zero, a goal pays once, goals see the writes), with a dashboard token and a required `Idempotency-Key` in the `admin` namespace. Claims ignore the claim policy (an admin can claim either kind). A player outside the owned environment is `404`. Corrections are ordinary ledger rows (`reason` is stored); there is no separate audit log. Bans (`POST .../players/{playerId}/ban`, `.../ban/lift`, `GET .../bans`, `?banned=true` on the list) are described under [Player bans](#player-bans); signing a player out without banning them is not built.
+* Players of an environment (`players-admin`), for the dashboard: `GET .../environments/{envId}/players?search=&limit=&cursor=` (newest first; `search` matches part of the display name, email or external key, or a whole player ID), `GET .../players/{playerId}` (identity, metadata, last session, active sessions), and `GET .../players/{playerId}/inventory|currency|transactions|progression|stats|achievements|quests`, the same data the game sees. Management, because players never use the dashboard: `POST .../players/{playerId}/items/grant`, `inventory/consume|equip|unequip`, `currency/credit|spend`, `xp/award`, `stats/{statKey}/increment`, `flags/{flagKey}/set`, `achievements/{key}/claim`, `quests/{key}/accept|abandon|claim`, `leaderboards/{key}/scores` and `GET|PUT|DELETE .../saves[/{slot}]`. They run the same handlers and transaction functions as the game, so every rule holds (a balance cannot go below zero, a goal pays once, goals see the writes), with a dashboard token and a required `Idempotency-Key` in the `admin` namespace. Claims ignore the claim policy (an admin can claim either kind). A player outside the owned environment is `404`. Corrections are ordinary ledger rows (`reason` is stored); there is no separate audit log. Bans (`POST .../players/{playerId}/ban`, `.../ban/lift`, `GET .../bans`, `?banned=true` on the list) are described under [Player bans](#player-bans); signing a player out without banning them is not built.
 * `GET|PUT /v1/projects/{projectId}/environments/{envId}/configurations/draft`
 * `POST /v1/projects/{projectId}/environments/{envId}/configurations/publish`
 * `GET /v1/projects/{projectId}/environments/{envId}/configurations/versions`
@@ -169,6 +171,7 @@ Supported leaderboard directions are `higher` and `lower`. Optional `season_star
 * `GET /v1/players/me/quests` (quest log: status, current stage, per-stage progress, claimable rewards, `resets_at` / `expires_at`)
 * `POST /v1/players/me/quests/{key}/accept` (`409 QUEST_ALREADY_ACTIVE` / `ALREADY_CLAIMED`; `422 QUEST_LOCKED`, `QUEST_NOT_AVAILABLE`, `QUEST_EXPIRED`), `.../abandon` (`422 QUEST_NOT_ACTIVE`), `.../claim` (claim policy `player`; `409 ALREADY_CLAIMED`, `422 NOT_COMPLETED`)
 * `POST /v1/leaderboards/{key}/scores`; `GET /v1/leaderboards/{key}?environment_id={public_environment_id}&limit=10`
+* `GET /v1/players/me/saves`; `GET|PUT|DELETE /v1/players/me/saves/{slot}` (cloud saves; see [Cloud saves](#cloud-saves))
 
 ### Trusted server APIs (environment-scoped credential)
 
@@ -180,9 +183,19 @@ Supply `X-Server-Credential: {credential}`:
 * `GET /v1/server/players/{playerId}/stats`; `POST .../stats/{statKey}/increment` (`{"amount":3}`, positive only); `POST .../flags/{flagKey}/set` (body optional; set-only)
 * `GET /v1/server/players/{playerId}/achievements` (unmasked); `POST .../achievements/{key}/claim` (any claim policy)
 * `GET /v1/server/players/{playerId}/quests`; `POST .../quests/{key}/accept|claim` (claim works for any claim policy)
+* `GET /v1/server/players/{playerId}/saves`; `GET|PUT|DELETE .../saves/{slot}` (any player of the credential's environment)
 * `POST /v1/server/batch` (`{"entries":[{"type":"grant|credit|xp|stat|flag","idempotency_key":"...","player_id":"...", ...}]}`): up to the project's `max_batch_entries` (default 500). Each entry runs the normal idempotency algorithm in its own savepoint, so a failing entry is reported in the 200 response and does not roll back the others; entries for one player apply in request order. `422 BATCH_SIZE`; `429 QUOTA_EXCEEDED` counts every entry as a write.
 
 The configured item/currency definitions must be published before use. Grant/consume quantities and credit/spend amounts must be positive. Economy, XP, stat, quest and claim writes use one transaction, a scoped idempotency record and an immutable ledger entry (`platform.Env.Mutate`). Ledger rows are stamped with the request clock (`Env.Now`), the same clock that stamps quest acceptances, so quest windows compare like with like (and tests can move time). A claim pays every reward with the normal stack and balance rules; if any reward fails (for example a full stack) the whole claim rolls back. A key replay with the same normalized request returns the saved result; reuse with a different payload yields HTTP 409.
+
+## Cloud saves
+
+Named JSON save slots per player, so a player can continue on another device (post-MVP, 2026-11-22; table `player_saves`, migration `014`).
+
+* `PUT .../saves/{slot}` with `{"data": <any JSON value except null>, "expected_version": 3}` creates (`201`) or replaces (`200`) a slot and returns `{slot, version, size_bytes, created_at, updated_at}`. The version starts at 1 and goes up by one on every write. `GET .../saves` lists slots without data (`meta.max_slots`, `meta.max_bytes`); `GET .../saves/{slot}` adds `data`; `DELETE .../saves/{slot}?expected_version=3` removes one. Every write needs an `Idempotency-Key`.
+* **Optimistic concurrency:** send the version you last read as `expected_version` (`0` = the slot must not exist yet). If another device wrote in between, the write is refused with `409 SAVE_VERSION_CONFLICT` and `details.current_version`, and the game decides how to merge. Omit `expected_version` for last-write-wins.
+* **Limits:** 10 slots per player (`422 SAVE_SLOT_LIMIT`), 256 KiB per save measured as compacted JSON (`422 SAVE_TOO_LARGE`; the request body limit is 1 MiB). Slot names use the catalog key format (`^[a-z0-9][a-z0-9_-]{0,62}$`). These are constants in `internal/saves`, not per-project settings.
+* The same handlers serve the player (`/v1/players/me/saves`), the trusted server (`/v1/server/players/{playerId}/saves`) and the dashboard (`.../environments/{envId}/players/{playerId}/saves`). Saves are client-authoritative when the client writes them; a game that must not trust its client writes saves only from its server. Saves are state, not a ledger: there is no history of earlier versions.
 
 ## Player bans
 

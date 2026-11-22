@@ -118,6 +118,14 @@ func Seed(ctx context.Context, db *pgxpool.Pool, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// A cloud save to look at on the Players screen's Saves tab. Inserted once: the demo
+	// player's game (or an admin) may have changed it since. Size = the compacted JSON.
+	save := `{"chapter":2,"checkpoint":"old_mine_entrance","playtime_minutes":95,"settings":{"difficulty":"normal","subtitles":true}}`
+	_, err = tx.Exec(ctx, `INSERT INTO player_saves(player_id,project_id,environment_id,slot,data,version,size_bytes,created_at,updated_at)
+		VALUES($1,$2,$3,'slot1',$4,1,$5,now(),now()) ON CONFLICT(player_id,slot) DO NOTHING`, playerID, projectID, envID, save, len(save))
+	if err != nil {
+		return err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}

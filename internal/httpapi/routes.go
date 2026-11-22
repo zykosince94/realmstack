@@ -18,6 +18,7 @@ import (
 	"realmstack-backend/internal/progression"
 	"realmstack-backend/internal/projects"
 	"realmstack-backend/internal/quests"
+	"realmstack-backend/internal/saves"
 	"realmstack-backend/internal/stats"
 )
 
@@ -38,6 +39,7 @@ func (s *Server) routes() {
 	achievementsH := achievements.Handler{Env: env}
 	questsH := quests.Handler{Env: env}
 	batchH := batch.Handler{Env: env, Quotas: s.Quotas}
+	savesH := saves.Handler{Env: env}
 	bansH := bans.Handler{Env: env, Cache: s.Bans}
 
 	r := s.router
@@ -102,6 +104,10 @@ func (s *Server) routes() {
 	adminPlayer.POST("/quests/:key/abandon", questsH.AbandonMine)
 	adminPlayer.POST("/quests/:key/claim", questsH.ClaimForPlayer)
 	adminPlayer.POST("/leaderboards/:key/scores", leaderboardsH.Submit)
+	adminPlayer.GET("/saves", savesH.List)
+	adminPlayer.GET("/saves/:slot", savesH.Get)
+	adminPlayer.PUT("/saves/:slot", savesH.Put)
+	adminPlayer.DELETE("/saves/:slot", savesH.Delete)
 	// Bans are dashboard-only (no game route bans a player). They are enforced at login,
 	// refresh and on every player-token request (playerAuth).
 	adminPlayer.GET("/bans", bansH.History)
@@ -161,6 +167,10 @@ func (s *Server) routes() {
 	me.POST("/quests/:key/accept", questsH.AcceptMine)
 	me.POST("/quests/:key/abandon", questsH.AbandonMine)
 	me.POST("/quests/:key/claim", questsH.ClaimMine)
+	me.GET("/saves", savesH.List)
+	me.GET("/saves/:slot", savesH.Get)
+	me.PUT("/saves/:slot", savesH.Put)
+	me.DELETE("/saves/:slot", savesH.Delete)
 
 	// Trusted game server (server credential; scope comes from the credential).
 	// Many trusted writes in one request; each entry is idempotent on its own.
@@ -177,6 +187,10 @@ func (s *Server) routes() {
 	server.GET("/quests", questsH.ForPlayer)
 	server.POST("/quests/:key/accept", questsH.AcceptForPlayer)
 	server.POST("/quests/:key/claim", questsH.ClaimForPlayer)
+	server.GET("/saves", savesH.List)
+	server.GET("/saves/:slot", savesH.Get)
+	server.PUT("/saves/:slot", savesH.Put)
+	server.DELETE("/saves/:slot", savesH.Delete)
 
 	// Leaderboards.
 	v.POST("/leaderboards/:key/scores", s.playerAuth(), s.quota(), leaderboardsH.Submit)

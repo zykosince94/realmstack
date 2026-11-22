@@ -15,7 +15,7 @@ tags:
   - name: configuration
   - name: players
   - name: players-admin
-    description: "Dashboard player management: read an owned environment's players and act on them (grants, currency, XP, stats, claims, quests, scores), and ban or unban them."
+    description: "Dashboard player management: read an owned environment's players and act on them (grants, currency, XP, stats, claims, quests, scores, saves), and ban or unban them."
   - name: inventory
   - name: economy
   - name: progression
@@ -23,6 +23,8 @@ tags:
   - name: stats
   - name: achievements
   - name: quests
+  - name: saves
+    description: "Cloud saves: named JSON slots per player with optimistic versioning."
   - name: ai
 paths:
   "/healthz":
@@ -3618,6 +3620,265 @@ paths:
           "$ref": "#/components/responses/E409"
         "422":
           "$ref": "#/components/responses/E422"
+  "/v1/projects/{projectId}/environments/{envId}/players/{playerId}/saves":
+    get:
+      operationId: getProjectPlayerSaves
+      tags:
+        - players-admin
+      summary: "List the player's save slots (no data), by name; meta carries max_slots and max_bytes."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to this environment)."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/SaveSummary"
+                  meta:
+                    "$ref": "#/components/schemas/SavesMeta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/projects/{projectId}/environments/{envId}/players/{playerId}/saves/{slot}":
+    get:
+      operationId: getProjectPlayerSave
+      tags:
+        - players-admin
+      summary: "Read one of the player's save slots with its data."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to this environment)."
+          schema:
+            type: string
+            format: uuid
+        - name: slot
+          in: path
+          required: true
+          description: "Save slot name: 1 to 63 lowercase letters, digits, - or _."
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Save"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    put:
+      operationId: putProjectPlayerSave
+      tags:
+        - players-admin
+      summary: "Create (201) or replace (200) one of the player's save slots. Send expected_version (0 to create) to refuse overwriting a newer save (409 SAVE_VERSION_CONFLICT with details.current_version); omit it for last-write-wins. 422 SAVE_TOO_LARGE or SAVE_SLOT_LIMIT."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to this environment)."
+          schema:
+            type: string
+            format: uuid
+        - name: slot
+          in: path
+          required: true
+          description: "Save slot name: 1 to 63 lowercase letters, digits, - or _."
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/SaveWrite"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/SaveSummary"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/SaveSummary"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+    delete:
+      operationId: deleteProjectPlayerSave
+      tags:
+        - players-admin
+      summary: "Delete one of the player's save slots."
+      security:
+        - userBearer: []
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          description: "Project ID."
+          schema:
+            type: string
+            format: uuid
+        - name: envId
+          in: path
+          required: true
+          description: "Environment ID."
+          schema:
+            type: string
+            format: uuid
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to this environment)."
+          schema:
+            type: string
+            format: uuid
+        - name: slot
+          in: path
+          required: true
+          description: "Save slot name: 1 to 63 lowercase letters, digits, - or _."
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+        - name: expected_version
+          in: query
+          required: false
+          description: "Delete only if the slot is still at this version (409 otherwise)."
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/SaveDeleted"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
   "/v1/projects/{projectId}/environments/{envId}/players/{playerId}/bans":
     get:
       operationId: getProjectPlayerBans
@@ -4396,6 +4657,186 @@ paths:
           "$ref": "#/components/responses/E409"
         "422":
           "$ref": "#/components/responses/E422"
+  "/v1/players/me/saves":
+    get:
+      operationId: getPlayersMeSaves
+      tags:
+        - saves
+      summary: "List your save slots (no data), by name; meta carries max_slots and max_bytes."
+      security:
+        - playerBearer: []
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/SaveSummary"
+                  meta:
+                    "$ref": "#/components/schemas/SavesMeta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "403":
+          "$ref": "#/components/responses/E403"
+  "/v1/players/me/saves/{slot}":
+    get:
+      operationId: getPlayersMeSavesBySlot
+      tags:
+        - saves
+      summary: "Read one of your save slots with its data."
+      security:
+        - playerBearer: []
+      parameters:
+        - name: slot
+          in: path
+          required: true
+          description: "Save slot name: 1 to 63 lowercase letters, digits, - or _."
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Save"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "403":
+          "$ref": "#/components/responses/E403"
+        "404":
+          "$ref": "#/components/responses/E404"
+    put:
+      operationId: putPlayersMeSavesBySlot
+      tags:
+        - saves
+      summary: "Create (201) or replace (200) one of your save slots. Send expected_version (0 to create) to refuse overwriting a newer save (409 SAVE_VERSION_CONFLICT with details.current_version); omit it for last-write-wins. 422 SAVE_TOO_LARGE or SAVE_SLOT_LIMIT."
+      security:
+        - playerBearer: []
+      parameters:
+        - name: slot
+          in: path
+          required: true
+          description: "Save slot name: 1 to 63 lowercase letters, digits, - or _."
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/SaveWrite"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/SaveSummary"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/SaveSummary"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "403":
+          "$ref": "#/components/responses/E403"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+    delete:
+      operationId: deletePlayersMeSavesBySlot
+      tags:
+        - saves
+      summary: "Delete one of your save slots."
+      security:
+        - playerBearer: []
+      parameters:
+        - name: slot
+          in: path
+          required: true
+          description: "Save slot name: 1 to 63 lowercase letters, digits, - or _."
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+        - name: expected_version
+          in: query
+          required: false
+          description: "Delete only if the slot is still at this version (409 otherwise)."
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/SaveDeleted"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "403":
+          "$ref": "#/components/responses/E403"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
   "/v1/server/players/{playerId}/items/grant":
     post:
       operationId: postServerPlayersByPlayeridItemsGrant
@@ -4753,6 +5194,209 @@ paths:
                 properties:
                   data:
                     "$ref": "#/components/schemas/ClaimResult"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+  "/v1/server/players/{playerId}/saves":
+    get:
+      operationId: getServerPlayersByPlayeridSaves
+      tags:
+        - saves
+      summary: "List a player's save slots (no data), by name; meta carries max_slots and max_bytes."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/SaveSummary"
+                  meta:
+                    "$ref": "#/components/schemas/SavesMeta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+  "/v1/server/players/{playerId}/saves/{slot}":
+    get:
+      operationId: getServerPlayersByPlayeridSavesBySlot
+      tags:
+        - saves
+      summary: "Read one of a player's save slots with its data."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+        - name: slot
+          in: path
+          required: true
+          description: "Save slot name: 1 to 63 lowercase letters, digits, - or _."
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/Save"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+    put:
+      operationId: putServerPlayersByPlayeridSavesBySlot
+      tags:
+        - saves
+      summary: "Create (201) or replace (200) one of a player's save slots. Send expected_version (0 to create) to refuse overwriting a newer save (409 SAVE_VERSION_CONFLICT with details.current_version); omit it for last-write-wins. 422 SAVE_TOO_LARGE or SAVE_SLOT_LIMIT."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+        - name: slot
+          in: path
+          required: true
+          description: "Save slot name: 1 to 63 lowercase letters, digits, - or _."
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/SaveWrite"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/SaveSummary"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/SaveSummary"
+                  meta:
+                    "$ref": "#/components/schemas/Meta"
+                required:
+                  - data
+                  - meta
+        "400":
+          "$ref": "#/components/responses/E400"
+        "401":
+          "$ref": "#/components/responses/E401"
+        "404":
+          "$ref": "#/components/responses/E404"
+        "409":
+          "$ref": "#/components/responses/E409"
+        "422":
+          "$ref": "#/components/responses/E422"
+    delete:
+      operationId: deleteServerPlayersByPlayeridSavesBySlot
+      tags:
+        - saves
+      summary: "Delete one of a player's save slots."
+      security:
+        - serverCredential: []
+      parameters:
+        - name: playerId
+          in: path
+          required: true
+          description: "Player ID (must belong to the credential's environment)."
+          schema:
+            type: string
+            format: uuid
+        - name: slot
+          in: path
+          required: true
+          description: "Save slot name: 1 to 63 lowercase letters, digits, - or _."
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"
+        - name: expected_version
+          in: query
+          required: false
+          description: "Delete only if the slot is still at this version (409 otherwise)."
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - "$ref": "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/SaveDeleted"
                   meta:
                     "$ref": "#/components/schemas/Meta"
                 required:
@@ -7942,6 +8586,81 @@ components:
         - claims
         - claimed_by_player
         - claimed_by_server
+    SavesMeta:
+      type: object
+      properties:
+        request_id:
+          type: string
+        max_slots:
+          type: integer
+          description: "How many save slots a player may have."
+        max_bytes:
+          type: integer
+          description: "The largest save, measured as compacted JSON."
+      required:
+        - request_id
+        - max_slots
+        - max_bytes
+    SaveSummary:
+      type: object
+      properties:
+        slot:
+          type: string
+        version:
+          type: integer
+          format: int64
+          description: "Starts at 1 and goes up by one on every write."
+        size_bytes:
+          type: integer
+          description: "Size of the compacted JSON."
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - slot
+        - version
+        - size_bytes
+        - created_at
+        - updated_at
+    Save:
+      allOf:
+        - "$ref": "#/components/schemas/SaveSummary"
+        - type: object
+          properties:
+            data:
+              description: "The saved JSON value, as written (key order may differ)."
+          required:
+            - data
+    SaveWrite:
+      type: object
+      properties:
+        data:
+          description: "Any JSON value except null; at most max_bytes when compacted."
+        expected_version:
+          type: integer
+          format: int64
+          minimum: 0
+          description: "The version last read (0 = the slot must not exist yet). Omit for last-write-wins."
+      required:
+        - data
+    SaveDeleted:
+      type: object
+      properties:
+        slot:
+          type: string
+        deleted:
+          type: boolean
+        version:
+          type: integer
+          format: int64
+          description: "The version that was deleted."
+      required:
+        - slot
+        - deleted
+        - version
     PlayerBan:
       type: object
       description: "A ban in force. The reason is shown to the player."
