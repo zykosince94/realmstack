@@ -11,7 +11,7 @@
 
 RealmStack is a production-minded game backend written in Go and backed by PostgreSQL. It gives every game project its own isolated environment, a publishable configuration model, and the services live games keep rebuilding: identity, inventory, currency, XP, leaderboards, achievements, quests, cloud saves and bans.
 
-The Go API is this repository. The React dashboard, player-management console, configuration editors and documentation live in the separate [realmstack-frontend](../realmstack-frontend) repository.
+The Go API is this repository. The React dashboard, player-management console, configuration editors and documentation live in the separate [RealmStack frontend repository](https://github.com/zykosince94/realmstack-frontend). repository.
 
 ![RealmStack dashboard showing player activity, concurrent players and daily active players](docs/screenshots/dashboard.png)
 
